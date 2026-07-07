@@ -1,0 +1,149 @@
+Build a complete browser-based Pokémon card scanner proof of concept.
+
+Goal:
+Create a web app that uses the phone/laptop camera to identify Pokémon cards from a photo.
+
+The priority is computer vision quality, not styling.
+
+Tech stack:
+- React
+- TypeScript
+- Browser only
+- No native mobile dependencies
+
+Core requirements:
+
+1. Camera scanner
+Create a camera interface that:
+- opens the device camera
+- shows a live preview
+- allows image capture
+- works on mobile browsers
+- handles permissions/errors
+
+2. Card detection
+Implement automatic Pokémon card detection.
+
+The scanner should:
+- find the outer rectangle of the card
+- detect tilted cards
+- detect cards at slight angles
+- ignore the background
+- show the detected outline live or after capture
+
+Use whatever browser-compatible computer vision approach works best:
+- OpenCV.js
+- WASM
+- existing document scanner libraries
+- custom algorithms
+
+Do not freeze the UI.
+
+3. Perspective correction
+After detecting the card:
+- find the four corners
+- apply perspective transform
+- output a straight portrait card image
+
+Example:
+
+Input:
+
+angled photo of card on desk
+
+Output:
+
+perfect rectangular card crop
+
+4. Image normalisation
+Prepare the card for matching:
+
+- resize consistently
+- correct orientation
+- normalise brightness/contrast
+- reduce glare impact if possible
+
+5. Debug pipeline
+Add a developer debug panel showing:
+
+- original capture
+- detected edges
+- detected rectangle
+- corrected card crop
+- processing time
+- detection confidence
+- failure reason
+
+6. Matching prototype
+Create a small local database of example Pokémon cards.
+
+Each reference card should have:
+- name
+- set
+- number
+- image
+
+Implement experimental matching using:
+- perceptual hashing
+- image similarity
+or another browser-safe method.
+
+Show:
+- best match
+- confidence %
+- top 5 alternatives
+
+7. Architecture
+
+Structure the code professionally:
+
+src/
+ components/
+ vision/
+ utils/
+ data/
+
+Separate:
+- camera logic
+- detection engine
+- matching engine
+- UI
+
+The scanner engine should be replaceable later.
+
+8. Performance
+
+Important:
+- avoid blocking the React main thread
+- use Web Workers where needed
+- handle large images
+- mobile performance matters
+
+9. User flow
+
+User:
+opens page
+↓
+camera starts
+↓
+holds Pokémon card up
+↓
+captures image
+↓
+scanner finds card
+↓
+straightens card
+↓
+matches card
+↓
+shows result
+
+10. Deliverables
+
+Create the full working application.
+Install any needed packages.
+Run the project.
+Fix all TypeScript/build errors.
+
+Do not fake the scanner.
+The main success criteria is real card rectangle detection and perspective correction.

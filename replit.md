@@ -1,45 +1,36 @@
-# [Project name]
+# Pokémon Card Scanner
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A browser-based Pokémon card scanner that uses real computer vision to detect, straighten, and identify Pokémon cards from a camera image.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/pokemon-scanner run dev` — run the frontend (port auto-assigned)
 - `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
 
 ## Stack
 
 - pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Frontend: React + Vite + Tailwind CSS
+- Computer vision: OpenCV.js (CDN-loaded, main thread)
+- Card matching: DCT-based perceptual hash (pHash) — custom implementation, no npm deps
+- No backend — fully browser-only
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/pokemon-scanner/src/vision/` — CV pipeline (CardDetector, PerspectiveCorrector, ImageNormalizer, CardMatcher)
+- `artifacts/pokemon-scanner/src/utils/phash.ts` — 63-bit DCT pHash implementation
+- `artifacts/pokemon-scanner/src/data/referenceCards.ts` — 15-card reference database (Base Set)
+- `artifacts/pokemon-scanner/src/hooks/useCamera.ts` — getUserMedia + stream lifecycle
+- `artifacts/pokemon-scanner/src/hooks/useScanner.ts` — full scan pipeline state machine
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
+- OpenCV.js is loaded via dynamic script injection (not npm), polled until `window.cv` is ready
+- All cv.Mat objects are deleted in `finally` blocks to prevent memory leaks in WebAssembly heap
+- Corners ordered by sum/diff method (TL=min(x+y), BR=max(x+y), TR=min(y-x), BL=max(y-x)) — robust to skew
+- pHash excludes the DC coefficient at [0,0] to reduce brightness/exposure sensitivity
+- Camera stream tracked via `useRef` (not useState) for deterministic cleanup on unmount
 
 ## User preferences
 
 _Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
