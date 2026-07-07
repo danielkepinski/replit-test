@@ -6,6 +6,7 @@ import { computePHash } from '../utils/phash';
 import { matchCard, MatchOutput } from '../vision/CardMatcher';
 import { getFingerprintIndex } from '../data/fingerprintDb';
 import { imageToGrayscale32x32 } from '../utils/canvasUtils';
+import { extractArtwork } from '../vision/ArtworkExtractor';
 import { DetectDebugStats } from '../vision/CardDetector';
 
 export type ScanState = 'idle' | 'detecting' | 'processing' | 'matched' | 'error';
@@ -83,8 +84,9 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
       pHashCanvas.height  = 560;
       pHashCanvas.getContext('2d')!.putImageData(normalized, 0, 0);
 
-      const smallImgData = imageToGrayscale32x32(pHashCanvas);
-      const hash         = computePHash(smallImgData);
+      const artworkCanvas = extractArtwork(pHashCanvas);
+      const smallImgData  = imageToGrayscale32x32(artworkCanvas);
+      const hash          = computePHash(smallImgData);
       setHashDebug(hash.toString(16).padStart(16, '0'));
 
       // Linear scan over the pre-built fingerprint index

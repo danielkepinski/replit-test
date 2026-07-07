@@ -69,13 +69,18 @@ async function decodeImageFallback(buffer) {
   return jpeg.default.decode(buffer, { useTArray: true }); // { width, height, data }
 }
 
-// ── Bilinear resize to 32×32 grayscale ──────────────────────────────────────
-function bilinearResize32(rgbaData, srcW, srcH) {
+// ── Artwork crop constants — mirror of ArtworkExtractor.ts ──────────────────
+// x: 8%→92%, y: 15%→55% of the card image (percentage-based, era-agnostic)
+const ARTWORK = { xMin: 0.08, xMax: 0.92, yMin: 0.15, yMax: 0.55 };
+
+// ── Bilinear resize to 32×32 grayscale with optional crop window ─────────────
+// cropX/Y/W/H are in source-image pixels; when omitted the full image is used.
+function bilinearResize32(rgbaData, srcW, srcH, cropX = 0, cropY = 0, cropW = srcW, cropH = srcH) {
   const out = new Float64Array(32 * 32);
   for (let dy = 0; dy < 32; dy++) {
     for (let dx = 0; dx < 32; dx++) {
-      const sx = (dx + 0.5) * srcW / 32 - 0.5;
-      const sy = (dy + 0.5) * srcH / 32 - 0.5;
+      const sx = cropX + (dx + 0.5) * cropW / 32 - 0.5;
+      const sy = cropY + (dy + 0.5) * cropH / 32 - 0.5;
       const x0 = Math.max(0, Math.floor(sx));
       const y0 = Math.max(0, Math.floor(sy));
       const x1 = Math.min(srcW - 1, x0 + 1);
@@ -140,7 +145,7 @@ function computePHash(pixels /* Float64Array 1024 */) {
   return hash.toString(16).padStart(16, '0');
 }
 
-// ── Image URL → pHash ────────────────────────────────────────────────────────
+// ── Image URL → artwork-only pHash ───────────────────────────────────────────
 async function hashImageUrl(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -148,20 +153,36 @@ async function hashImageUrl(url) {
 
   let pixels;
   if (sharpFn) {
-    const { data } = await sharpFn(buf).resize(32, 32).grayscale().raw()
+    // Read metadata once to compute crop in source pixels, then crop → resize → grayscale
+    const meta   = await sharpFn(buf).metadata();
+    const cropX  = Math.round(ARTWORK.xMin * meta.width);
+    const cropY  = Math.round(ARTWORK.yMin * meta.height);
+    const cropW  = Math.round((ARTWORK.xMax - ARTWORK.xMin) * meta.width);
+    const cropH  = Math.round((ARTWORK.yMax - ARTWORK.yMin) * meta.height);
+    const { data } = await sharpFn(buf)
+      .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
+      .resize(32, 32)
+      .grayscale()
+      .raw()
       .toBuffer({ resolveWithObject: true });
     pixels = new Float64Array(data.length);
     for (let i = 0; i < data.length; i++) pixels[i] = data[i];
   } else {
     const { width, height, data } = await decodeImageFallback(buf);
-    pixels = bilinearResize32(data, width, height);
+    const cropX = Math.round(ARTWORK.xMin * width);
+    const cropY = Math.round(ARTWORK.yMin * height);
+    const cropW = Math.round((ARTWORK.xMax - ARTWORK.xMin) * width);
+    const cropH = Math.round((ARTWORK.yMax - ARTWORK.yMin) * height);
+    pixels = bilinearResize32(data, width, height, cropX, cropY, cropW, cropH);
   }
 
   return computePHash(pixels);
 }
 
 // ── pokemontcg.io API ────────────────────────────────────────────────────────
-const API_BASE = 'https://api.pokemontcg.io/v2';
+const API_BASE  = 'https://api.pokemontcg.io/v2';
+const META_CACHE = path.resolve(ROOT, '.cache/card-meta.json');
+const META_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
 
 async function fetchCardsPage(page, pageSize = 250) {
   const params = new URLSearchParams({
@@ -181,22 +202,56 @@ async function fetchCardsPage(page, pageSize = 250) {
 }
 
 async function fetchAllCardMeta() {
+  // Use cached metadata when available (avoids 10+ minutes of API pagination on resume)
+  const cacheKey = ONLY_SETS.length ? ONLY_SETS.join(',') : 'all';
+  if (!ONLY_SETS.length && existsSync(META_CACHE)) {
+    try {
+      const raw   = await readFile(META_CACHE, 'utf8');
+      const cache = JSON.parse(raw);
+      if (cache.key === cacheKey && Date.now() - cache.fetchedAt < META_TTL_MS) {
+        console.log(`  Metadata: using cached list (${cache.cards.length} cards, fetched ${new Date(cache.fetchedAt).toISOString()})`);
+        return isFinite(LIMIT) ? cache.cards.slice(0, LIMIT) : cache.cards;
+      }
+    } catch { /* ignore bad cache */ }
+  }
+
   console.log('Fetching card metadata from pokemontcg.io…');
   const first = await fetchCardsPage(1);
   const total = Math.min(first.totalCount, isFinite(LIMIT) ? LIMIT : Infinity);
-  const pages = Math.ceil(Math.min(first.count + (first.pageSize * (Math.ceil(total / first.pageSize) - 1)), total) / first.pageSize);
+  const pageSize = first.pageSize ?? 250;
+  const totalPages = Math.ceil(total / pageSize);
+
+  console.log(`  Total cards available: ${first.totalCount} · ${totalPages} pages · fetching up to ${total}`);
+
+  // Fetch remaining pages in parallel (8 concurrent) — much faster than sequential
+  const pageNums = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+  let pagesReceived = 1;
+  const pageResults = await (async () => {
+    const out = new Array(pageNums.length);
+    let idx = 0;
+    async function worker() {
+      while (idx < pageNums.length) {
+        const i = idx++;
+        out[i] = await fetchCardsPage(pageNums[i]);
+        pagesReceived++;
+        process.stdout.write(`  Metadata: page ${pagesReceived}/${totalPages}\r`);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(8, pageNums.length) }, worker));
+    return out;
+  })();
+  console.log();
 
   const cards = [...first.data];
-  console.log(`  Total cards available: ${first.totalCount} · fetching up to ${total}`);
+  for (const page of pageResults) cards.push(...page.data);
 
-  for (let p = 2; p <= Math.ceil(total / first.pageSize); p++) {
-    if (cards.length >= total) break;
-    await new Promise(r => setTimeout(r, 200)); // polite pacing
-    const page = await fetchCardsPage(p);
-    cards.push(...page.data);
-    process.stdout.write(`  Metadata: ${Math.min(cards.length, total)} / ${total}\r`);
+  // Cache the full list for future runs
+  if (!ONLY_SETS.length && !isFinite(LIMIT)) {
+    await mkdir(path.dirname(META_CACHE), { recursive: true });
+    await writeFile(META_CACHE, JSON.stringify({ key: cacheKey, fetchedAt: Date.now(), cards }), 'utf8');
+    console.log(`  Metadata cached → ${META_CACHE}`);
   }
-  console.log();
+
   return cards.slice(0, total);
 }
 
@@ -250,6 +305,17 @@ async function loadExisting() {
   let errs  = 0;
   const results = new Map(existing);
 
+  // Save progress to disk periodically so the resume logic works across runs.
+  const SAVE_INTERVAL = 200; // write every N newly completed cards
+  async function saveProgress() {
+    const sorted = [...results.values()].sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    );
+    const db = { generated: new Date().toISOString(), count: sorted.length, cards: sorted };
+    await mkdir(path.dirname(OUT_PATH), { recursive: true });
+    await writeFile(OUT_PATH, JSON.stringify(db, null, 2), 'utf8');
+  }
+
   const tasks = todo.map(card => async () => {
     const imageUrl = card.images?.small;
     if (!imageUrl) {
@@ -267,6 +333,7 @@ async function loadExisting() {
         hash,
       });
       done++;
+      if (done % SAVE_INTERVAL === 0) await saveProgress();
       process.stdout.write(
         `  Processed ${done + existing.size}/${allMeta.length} (${errs} errors)\r`
       );
