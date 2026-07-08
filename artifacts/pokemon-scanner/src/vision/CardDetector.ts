@@ -27,11 +27,23 @@ export interface DetectResult {
 const CARD_RATIO = 63 / 88;    // ~0.716
 
 /**
- * Tighter window than the old 0.55–0.85.  0.65–0.80 rejects rectangles that
- * are too square or too narrow while still tolerating mild perspective skew.
+ * Hard pre-filter window.  Only quads whose ratio falls entirely outside this
+ * range (in either portrait or landscape orientation) are rejected before
+ * scoring.  Wide enough to accommodate cards held at a significant camera
+ * angle — perspective foreshortening can shift the apparent ratio well away
+ * from the ideal 0.716.
  */
-const RATIO_MIN = 0.65;
-const RATIO_MAX = 0.80;
+const RATIO_MIN = 0.50;
+const RATIO_MAX = 0.90;
+
+/**
+ * Scoring anchor points — aspect-ratio score reaches exactly 0.0 at these
+ * values.  They extend beyond the filter window so that cards near the
+ * filter boundary still receive a meaningful partial score rather than
+ * landing very close to zero.
+ */
+const SCORE_ANCHOR_MIN = 0.35;
+const SCORE_ANCHOR_MAX = 1.10;
 
 /**
  * Pixels (in work-resolution space) a corner may be from the image edge.
@@ -152,28 +164,35 @@ interface ScoredCandidate {
   contourArea: number;
   aspectRatioScore: number;
   rectangularityScore: number;
+  cornerScore: number;
   areaScore: number;
   totalScore: number;
 }
 
 /**
- * Score a 4-corner candidate on three independent axes (each 0–1):
+ * Score a 4-corner candidate on four independent axes (each 0–1):
  *
- *  aspectRatioScore   — closeness to the ideal 0.716 card ratio.
- *                       Reaches 1.0 exactly at CARD_RATIO; falls to 0 at the
- *                       RATIO_MIN / RATIO_MAX boundaries.
+ *  aspectRatioScore    — closeness to the ideal 0.716 card ratio.
+ *                        Picks whichever orientation (portrait / landscape) is
+ *                        closer to CARD_RATIO so a rotated-90° card is handled
+ *                        automatically.  Piecewise linear from the scoring
+ *                        anchors (SCORE_ANCHOR_MIN/MAX) to 1.0 at CARD_RATIO.
+ *                        Uses extended anchors so cards near the filter
+ *                        boundary still get a non-trivial score.
  *
- *  rectangularityScore — how much the original contour "fills" the quad formed
- *                       by its 4 approximated corners.  A clean card edge gives
- *                       a score near 1.0; a blob that includes a hand or
- *                       background irregularity scores lower.
+ *  rectangularityScore — contourArea / quadArea.  A clean card edge scores
+ *                        near 1.0; blobs distorted by a hand or background
+ *                        score lower.  Primary discriminator vs. hands.
  *
- *  areaScore          — prefer cards that cover a substantial but not
- *                       overwhelming portion of the frame.  Rises linearly to
- *                       1.0 at ~30 % of frame area; falls off gently above
- *                       65 % to penalise full-frame blobs.
+ *  cornerScore         — how close the 4 interior angles are to 90°.
+ *                        Score per corner = 1 − |cos θ|; averaged over all 4.
+ *                        A rectangle (including perspective-distorted cards)
+ *                        scores near 1.0; organic hand shapes score lower.
  *
- * Weights: aspect 40 %, rectangularity 40 %, area 20 %.
+ *  areaScore           — prefer cards that cover a substantial but not
+ *                        overwhelming portion of the frame.
+ *
+ * Weights: aspect 25 %, rectangularity 40 %, corner 25 %, area 10 %.
  */
 function scoreCandidate(
   pts: [Point, Point, Point, Point],
@@ -181,40 +200,60 @@ function scoreCandidate(
   frameArea: number,
 ): ScoredCandidate {
   // ── Aspect ratio score ───────────────────────────────────────────────────
-  // Piecewise linear: score = 1.0 exactly at CARD_RATIO, falls to 0.0 at
-  // each boundary (RATIO_MIN below, RATIO_MAX above).  Using max() of the two
-  // half-ranges as a single denominator would leave one boundary above 0 due
-  // to the asymmetric window around CARD_RATIO.
+  // Pick the orientation (ratio or 1/ratio) that is closer to CARD_RATIO.
+  // This handles landscape cards and perspective rotations without needing
+  // a separate isCardRatio() gate inside the scorer.
   const ratio = quadAspectRatio(pts);
-  const effectiveRatio = isCardRatio(ratio) ? ratio : 1 / ratio;
+  const inv   = 1 / ratio;
+  const effectiveRatio = Math.abs(ratio - CARD_RATIO) <= Math.abs(inv - CARD_RATIO)
+    ? ratio : inv;
+
+  // Piecewise linear: 1.0 at CARD_RATIO, 0.0 at SCORE_ANCHOR_MIN/MAX.
+  // The anchors extend past RATIO_MIN/RATIO_MAX so boundary candidates still
+  // receive a real score rather than landing near zero.
   const aspectRatioScore = effectiveRatio <= CARD_RATIO
-    ? Math.max(0, (effectiveRatio - RATIO_MIN)  / (CARD_RATIO - RATIO_MIN))
-    : Math.max(0, (RATIO_MAX - effectiveRatio)  / (RATIO_MAX - CARD_RATIO));
+    ? Math.max(0, (effectiveRatio - SCORE_ANCHOR_MIN) / (CARD_RATIO - SCORE_ANCHOR_MIN))
+    : Math.max(0, (SCORE_ANCHOR_MAX - effectiveRatio) / (SCORE_ANCHOR_MAX - CARD_RATIO));
 
   // ── Rectangularity score ─────────────────────────────────────────────────
-  // contourArea / quadArea — how closely the raw contour fills its 4-corner hull.
-  // A perfect rectangle has a ratio of 1.0.
-  // Contours distorted by a hand or background give lower values.
   const qa = quadArea(pts);
   const rectangularityScore = qa > 0 ? Math.min(contourArea / qa, 1) : 0;
+
+  // ── Corner score ─────────────────────────────────────────────────────────
+  // For each corner, measure the interior angle using the two outgoing edge
+  // vectors.  score per corner = 1 − |cos θ|; perfect 90° → cos = 0 → 1.0.
+  const [tl, tr, br, bl] = pts;
+  function cornerCos(prev: Point, cur: Point, next: Point): number {
+    const ax = prev.x - cur.x, ay = prev.y - cur.y;
+    const bx = next.x - cur.x, by = next.y - cur.y;
+    const lenA = Math.hypot(ax, ay), lenB = Math.hypot(bx, by);
+    if (lenA === 0 || lenB === 0) return 0;
+    return (ax * bx + ay * by) / (lenA * lenB);
+  }
+  const cosines = [
+    cornerCos(bl, tl, tr),   // TL
+    cornerCos(tl, tr, br),   // TR
+    cornerCos(tr, br, bl),   // BR
+    cornerCos(br, bl, tl),   // BL
+  ];
+  const cornerScore = cosines.reduce((sum, c) => sum + (1 - Math.abs(c)), 0) / 4;
 
   // ── Area score ───────────────────────────────────────────────────────────
   const areaFrac = contourArea / frameArea;
   let areaScore: number;
   if (areaFrac <= 0.65) {
-    // Larger is better up to 65 % — grows linearly, caps at 30 %
     areaScore = Math.min(areaFrac / 0.30, 1.0);
   } else {
-    // Above 65 %: increasingly likely to be background or hand+card blob
     areaScore = Math.max(0, 1.0 - (areaFrac - 0.65) / 0.35);
   }
 
   const totalScore =
-    aspectRatioScore   * 0.40 +
+    aspectRatioScore    * 0.25 +
     rectangularityScore * 0.40 +
-    areaScore           * 0.20;
+    cornerScore         * 0.25 +
+    areaScore           * 0.10;
 
-  return { pts, contourArea, aspectRatioScore, rectangularityScore, areaScore, totalScore };
+  return { pts, contourArea, aspectRatioScore, rectangularityScore, cornerScore, areaScore, totalScore };
 }
 
 // ── emptyStats ────────────────────────────────────────────────────────────────
@@ -354,7 +393,10 @@ export function detectCard(
       const ordered = orderCorners(poly4);
       const ratio   = quadAspectRatio(ordered);
 
-      // 4. Aspect ratio (tighter window: 0.65–0.80)
+      // 4. Aspect ratio hard filter (0.50–0.90).
+      //    Only truly extreme shapes are rejected here; scoring handles the
+      //    rest.  Perspective foreshortening can push a real card close to
+      //    the boundary, so the window is intentionally wide.
       if (!isCardRatio(ratio) && !isCardRatio(1 / ratio)) {
         stats.rejectedByAspectRatio++;
         cnt.delete();
