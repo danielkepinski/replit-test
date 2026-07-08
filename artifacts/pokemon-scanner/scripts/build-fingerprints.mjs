@@ -79,6 +79,65 @@ const CROPS = {
   borderless: { xMin: 0.02, xMax: 0.98, yMin: 0.02, yMax: 0.98 },
 };
 
+// ── Colour signature (mirrors src/utils/colourSignature.ts) ──────────────────
+// Accepts a flat byte array (channels=3 for RGB, channels=4 for RGBA),
+// pixelCount = width × height of the buffer.
+// Returns a 30-char lowercase hex string: RRGGBB + 12 hue-histogram bytes.
+function computeColourSig(data, pixelCount, channels) {
+  let sumR = 0, sumG = 0, sumB = 0;
+  const hist = new Float64Array(12);
+  let colourPixels = 0;
+
+  for (let i = 0; i < pixelCount * channels; i += channels) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    sumR += r; sumG += g; sumB += b;
+
+    const maxV = Math.max(r, g, b) / 255;
+    const minV = Math.min(r, g, b) / 255;
+    const sat  = maxV === 0 ? 0 : (maxV - minV) / maxV;
+    if (sat >= 0.12 && maxV >= 0.08) {
+      const rN = r / 255, gN = g / 255, bN = b / 255;
+      let hue;
+      if (maxV === rN)      hue = ((gN - bN) / (maxV - minV) + 6) % 6;
+      else if (maxV === gN) hue = (bN - rN)  / (maxV - minV) + 2;
+      else                  hue = (rN - gN)  / (maxV - minV) + 4;
+      hist[Math.min(11, Math.floor((hue * 60) % 360 / 30))]++;
+      colourPixels++;
+    }
+  }
+
+  const avgR = Math.round(sumR / pixelCount);
+  const avgG = Math.round(sumG / pixelCount);
+  const avgB = Math.round(sumB / pixelCount);
+  const hueHist = Array.from({ length: 12 }, (_, i) =>
+    colourPixels > 0 ? Math.round((hist[i] / colourPixels) * 255) : 0,
+  );
+
+  const bytes = [avgR, avgG, avgB, ...hueHist];
+  return bytes.map(b => (b & 0xff).toString(16).padStart(2, '0')).join('');
+}
+
+// Compute colour signature from a full-image RGBA buffer by nearest-neighbour
+// sampling into a 32×32 grid of the given crop window.  Used by the pure-JS
+// fallback path where we don't have sharp.
+function colourSigFromCrop(rgbaData, srcW, srcH, cropX, cropY, cropW, cropH) {
+  const N = 32;
+  const buf = new Uint8Array(N * N * 4);
+  for (let dy = 0; dy < N; dy++) {
+    for (let dx = 0; dx < N; dx++) {
+      const sx = Math.min(srcW - 1, Math.round(cropX + (dx + 0.5) * cropW / N));
+      const sy = Math.min(srcH - 1, Math.round(cropY + (dy + 0.5) * cropH / N));
+      const srcI = (sy * srcW + sx) * 4;
+      const dstI = (dy * N + dx) * 4;
+      buf[dstI]     = rgbaData[srcI];
+      buf[dstI + 1] = rgbaData[srcI + 1];
+      buf[dstI + 2] = rgbaData[srcI + 2];
+      buf[dstI + 3] = rgbaData[srcI + 3];
+    }
+  }
+  return computeColourSig(buf, N * N, 4);
+}
+
 // ── Bilinear resize to 32×32 grayscale with optional crop window ─────────────
 // cropX/Y/W/H are in source-image pixels; when omitted the full image is used.
 function bilinearResize32(rgbaData, srcW, srcH, cropX = 0, cropY = 0, cropW = srcW, cropH = srcH) {
@@ -151,15 +210,17 @@ function computePHash(pixels /* Float64Array 1024 */) {
   return hash.toString(16).padStart(16, '0');
 }
 
-// ── Image URL → multi-crop pHashes ───────────────────────────────────────────
-// Returns { classicHash, fullArtHash, borderlessHash } for a single image.
+// ── Image URL → multi-crop pHashes + colour signatures ───────────────────────
+// Returns { classicHash, fullArtHash, borderlessHash,
+//           classicColor, fullArtColor, borderlessColor }.
 // The image buffer is decoded once; all three crops share the same raw pixels.
-async function hashImageUrl(url) {
+async function processImageUrl(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  const hashes = {};
+  const hashes  = {};
+  const colours = {};
 
   if (sharpFn) {
     const meta = await sharpFn(buf).metadata();
@@ -169,14 +230,27 @@ async function hashImageUrl(url) {
       const cropY = Math.round(crop.yMin * height);
       const cropW = Math.round((crop.xMax - crop.xMin) * width);
       const cropH = Math.round((crop.yMax - crop.yMin) * height);
-      const { data } = await sharpFn(buf)
+
+      // Get raw RGB at 32×32 — one operation per crop, no separate grayscale call.
+      // Using nearest-neighbour matches the fallback path; the colour signature
+      // is a coarse 12-bin histogram so minor differences in resize kernels
+      // (Lanczos / bilinear / nearest) have negligible effect on matching.
+      const { data, info } = await sharpFn(buf)
         .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
-        .resize(32, 32)
-        .grayscale()
+        .resize(32, 32, { kernel: 'nearest' })
         .raw()
         .toBuffer({ resolveWithObject: true });
-      const pixels = new Float64Array(data.length);
-      for (let i = 0; i < data.length; i++) pixels[i] = data[i];
+
+      const ch = info.channels; // 3 (JPEG/RGB) or 4 (PNG/RGBA)
+
+      // Colour signature from raw RGB channels
+      colours[`${mode}Color`] = computeColourSig(data, 32 * 32, ch);
+
+      // pHash — convert to BT.601 luminance manually (same as .grayscale())
+      const pixels = new Float64Array(32 * 32);
+      for (let i = 0, p = 0; i < data.length; i += ch, p++) {
+        pixels[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
       hashes[`${mode}Hash`] = computePHash(pixels);
     }
   } else {
@@ -186,12 +260,12 @@ async function hashImageUrl(url) {
       const cropY = Math.round(crop.yMin * height);
       const cropW = Math.round((crop.xMax - crop.xMin) * width);
       const cropH = Math.round((crop.yMax - crop.yMin) * height);
-      const pixels = bilinearResize32(data, width, height, cropX, cropY, cropW, cropH);
-      hashes[`${mode}Hash`] = computePHash(pixels);
+      hashes[`${mode}Hash`]  = computePHash(bilinearResize32(data, width, height, cropX, cropY, cropW, cropH));
+      colours[`${mode}Color`] = colourSigFromCrop(data, width, height, cropX, cropY, cropW, cropH);
     }
   }
 
-  return hashes; // { classicHash, fullArtHash, borderlessHash }
+  return { ...hashes, ...colours };
 }
 
 // ── pokemontcg.io API ────────────────────────────────────────────────────────
@@ -356,14 +430,15 @@ async function loadExisting() {
   const allMeta  = await fetchAllCardMeta();
 
   // Filter to only cards that still need processing.
-  // Re-process old single-hash entries (only have `hash`, missing the new fields).
+  // Re-process entries missing multi-crop hashes OR colour signatures (v3).
   const ZERO = '0'.repeat(16);
   const todo = allMeta.filter(c => {
     const e = existing.get(c.id);
     return !e
       || !e.classicHash    || e.classicHash    === ZERO
       || !e.fullArtHash    || e.fullArtHash    === ZERO
-      || !e.borderlessHash || e.borderlessHash === ZERO;
+      || !e.borderlessHash || e.borderlessHash === ZERO
+      || !e.classicColor   || !e.fullArtColor  || !e.borderlessColor;
   });
 
   console.log(`Cards to process: ${todo.length} (${existing.size} cached)`);
@@ -394,14 +469,15 @@ async function loadExisting() {
       return;
     }
     try {
-      const hashes = await hashImageUrl(imageUrl); // { classicHash, fullArtHash, borderlessHash }
+      // { classicHash, fullArtHash, borderlessHash, classicColor, fullArtColor, borderlessColor }
+      const processed = await processImageUrl(imageUrl);
       results.set(card.id, {
         id:       card.id,
         name:     card.name,
         set:      setName,
         number:   card.number ?? '',
         imageUrl,
-        ...hashes,
+        ...processed,
       });
       done++;
       if (done % SAVE_INTERVAL === 0) await saveProgress();

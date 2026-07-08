@@ -9,6 +9,7 @@ import { imageToGrayscale32x32 } from '../utils/canvasUtils';
 import { extractAllCrops, CropMode } from '../vision/ArtworkExtractor';
 import { DetectDebugStats } from '../vision/CardDetector';
 import { validateCardStructure, CardStructureResult } from '../vision/CardStructureValidator';
+import { extractColourSignature, ColourSignature } from '../utils/colourSignature';
 
 export type ScanState = 'idle' | 'detecting' | 'processing' | 'matched' | 'error';
 
@@ -104,21 +105,22 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
         return;
       }
 
-      // 4. Extract all three crop regions → 5. resize each to 32×32 → 6. pHash
+      // 4. Extract all three crop regions → 5. hash + colour per crop
       const crops = extractAllCrops(normCanvas);
       const queryHashes: Record<CropMode, bigint> = {
         classic:    computePHash(imageToGrayscale32x32(crops.classic)),
         fullArt:    computePHash(imageToGrayscale32x32(crops.fullArt)),
         borderless: computePHash(imageToGrayscale32x32(crops.borderless)),
       };
-      // Linear scan over the pre-built fingerprint index — best distance wins
+      const queryColours: Record<CropMode, ColourSignature> = {
+        classic:    extractColourSignature(crops.classic),
+        fullArt:    extractColourSignature(crops.fullArt),
+        borderless: extractColourSignature(crops.borderless),
+      };
+      // Linear scan — combined hash + colour score
       const index  = getFingerprintIndex();
-      const output = matchCard(queryHashes, index);
-      // Show classic hash + which crop mode produced the best match
-      setHashDebug(
-        queryHashes.classic.toString(16).padStart(16, '0') +
-        ` [${output.winningCropMode}]`
-      );
+      const output = matchCard(queryHashes, queryColours, index);
+      setHashDebug(`[${output.winningCropMode}]`);
       setMatchResult(output);
 
       setProcessingTime(Math.round(performance.now() - t0));

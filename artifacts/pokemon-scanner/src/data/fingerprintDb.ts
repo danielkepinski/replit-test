@@ -1,39 +1,44 @@
 /**
  * Fingerprint database – pre-built at compile time by scripts/build-fingerprints.mjs.
  *
- * Schema has two generations:
+ * Schema generations:
  *
- *   Legacy (single-hash):
+ *   v1 – Legacy (single-hash):
  *     { id, name, set, number, imageUrl, hash }
- *     Built with the classic artwork crop only.
  *
- *   Multi-crop (current):
- *     { id, name, set, number, imageUrl, classicHash, fullArtHash, borderlessHash }
- *     Three independent hashes — one per ArtworkExtractor crop region.
+ *   v2 – Multi-crop hashes:
+ *     { …, classicHash, fullArtHash, borderlessHash }
  *
- * loadFingerprintIndex() normalises legacy entries on the fly:
- *   classicHash = fullArtHash = borderlessHash = hash
- * so matching works immediately without a rebuild.  Running
- * build-fingerprints.mjs regenerates all three hashes per card.
+ *   v3 – Multi-crop hashes + colour signatures (current):
+ *     { …, classicColor, fullArtColor, borderlessColor }
+ *     Each colour field is a 30-char hex string (ColourSignature).
  *
- * At runtime the JSON is loaded once via a dynamic import (Vite splits it into
- * a separate lazy chunk so it never blocks the initial render).
+ * loadFingerprintIndex() normalises older entries on the fly so matching works
+ * without a rebuild; running build-fingerprints.mjs regenerates everything.
+ *
+ * At runtime the JSON is loaded once via a dynamic import (Vite lazy chunk).
  */
 
-// ── Raw JSON shape (either generation) ────────────────────────────────────
+import { ColourSignature, deserializeColour } from '../utils/colourSignature';
+
+// ── Raw JSON shape (any generation) ───────────────────────────────────────
 
 interface RawEntry {
-  id:             string;
-  name:           string;
-  set:            string;
-  number:         string;
-  imageUrl:       string;
-  /** Legacy single-hash field. Present in old format entries only. */
-  hash?:          string;
-  /** Multi-crop fields. Present in new format entries. */
-  classicHash?:   string;
-  fullArtHash?:   string;
+  id:              string;
+  name:            string;
+  set:             string;
+  number:          string;
+  imageUrl:        string;
+  /** v1 single-hash field. */
+  hash?:           string;
+  /** v2 multi-crop hash fields. */
+  classicHash?:    string;
+  fullArtHash?:    string;
   borderlessHash?: string;
+  /** v3 colour-signature fields (30-char hex). */
+  classicColor?:    string;
+  fullArtColor?:    string;
+  borderlessColor?: string;
 }
 
 interface FingerprintDb {
@@ -60,6 +65,10 @@ export interface CardFingerprint {
   fullArtHash:    string;
   /** Near-full-card crop pHash (x:2–98 %, y:2–98 %). */
   borderlessHash: string;
+  /** Colour signatures — null when not yet computed (pre-v3 entries). */
+  classicColor:    ColourSignature | null;
+  fullArtColor:    ColourSignature | null;
+  borderlessColor: ColourSignature | null;
 }
 
 // ── Normalisation ──────────────────────────────────────────────────────────
@@ -77,6 +86,10 @@ function normalise(raw: RawEntry): CardFingerprint {
     classicHash:    raw.classicHash    ?? fallback,
     fullArtHash:    raw.fullArtHash    ?? fallback,
     borderlessHash: raw.borderlessHash ?? fallback,
+    // Colour: deserialise hex → ColourSignature; null if missing (pre-v3)
+    classicColor:    deserializeColour(raw.classicColor),
+    fullArtColor:    deserializeColour(raw.fullArtColor),
+    borderlessColor: deserializeColour(raw.borderlessColor),
   };
 }
 

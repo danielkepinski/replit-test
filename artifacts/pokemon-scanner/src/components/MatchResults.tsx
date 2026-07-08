@@ -2,15 +2,18 @@ import React from 'react';
 import { MatchOutput } from '../vision/CardMatcher';
 
 interface Props {
-  result: MatchOutput | null;
+  result:     MatchOutput | null;
   onScanAgain: () => void;
 }
 
 export function MatchResults({ result, onScanAgain }: Props) {
   if (!result) return null;
 
-  const { bestMatch, alternatives, indexSize, searchTime } = result;
-  const { card, distance, confidence } = bestMatch;
+  const { bestMatch, alternatives, indexSize, searchTime, winningCropMode } = result;
+  const { card, distance, confidence, hashScore, colourScore, combinedScore } = bestMatch;
+
+  const scoreColor = (v: number) =>
+    v >= 0.70 ? 'text-primary' : v >= 0.50 ? 'text-amber-400' : 'text-destructive';
 
   return (
     <div className="flex flex-col gap-6 w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -32,7 +35,7 @@ export function MatchResults({ result, onScanAgain }: Props) {
               </p>
             </div>
 
-            {/* Confidence bar */}
+            {/* Combined confidence bar */}
             <div className="flex flex-col gap-1">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-muted-foreground">Confidence</span>
@@ -46,23 +49,41 @@ export function MatchResults({ result, onScanAgain }: Props) {
               </div>
             </div>
 
-            {/* Hash distance + performance */}
+            {/* Score breakdown grid */}
             <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] font-mono border-t border-border/40 pt-3">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Hamming dist</span>
-                <span className={distance <= 10 ? 'text-primary' : distance <= 20 ? 'text-amber-400' : 'text-destructive'}>
-                  {distance} / 63 bits
+                <span className="text-muted-foreground">Hash match</span>
+                <span className={scoreColor(hashScore)}>
+                  {(hashScore * 100).toFixed(1)}%
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">conf formula</span>
-                <span className="text-muted-foreground/70">max(0,(32−d)/32)</span>
+                <span className="text-muted-foreground">Colour match</span>
+                <span className={scoreColor(colourScore)}>
+                  {(colourScore * 100).toFixed(1)}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Final score</span>
+                <span className={scoreColor(combinedScore)}>
+                  {(combinedScore * 100).toFixed(1)}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Mode</span>
+                <span className="text-primary/80">{winningCropMode}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Hamming dist</span>
+                <span className={distance <= 10 ? 'text-primary' : distance <= 20 ? 'text-amber-400' : 'text-destructive'}>
+                  {distance} / 63
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Search time</span>
                 <span className="text-primary">{searchTime.toFixed(2)} ms</span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between col-span-2">
                 <span className="text-muted-foreground">Index size</span>
                 <span className="text-primary">{indexSize.toLocaleString()} cards</span>
               </div>

@@ -1,0 +1,1 @@
+- [Colour-aware matching](colour-matching.md) — ColourSignature is a 30-char hex string (RRGGBB + 12 hue-hist bytes); combined score = hash×0.65 + colour×0.35; null colour falls back to hash-only.

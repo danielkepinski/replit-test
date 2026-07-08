@@ -1,24 +1,35 @@
 import React, { useEffect, useRef } from 'react';
 import { DetectDebugStats } from '../vision/CardDetector';
 import { CardStructureResult } from '../vision/CardStructureValidator';
+import { MatchOutput } from '../vision/CardMatcher';
 
 interface Props {
   canvases: {
-    original: HTMLCanvasElement;
-    edges: HTMLCanvasElement;
-    rect: HTMLCanvasElement;
-    crop: HTMLCanvasElement;
+    original:   HTMLCanvasElement;
+    edges:      HTMLCanvasElement;
+    rect:       HTMLCanvasElement;
+    crop:       HTMLCanvasElement;
     normalized: HTMLCanvasElement;
   };
-  processingTime: number;
-  confidence: number;
-  failReason: string | null;
-  hashDebug: string;
-  debugStats: DetectDebugStats;
+  processingTime:      number;
+  confidence:          number;
+  failReason:          string | null;
+  hashDebug:           string;
+  debugStats:          DetectDebugStats;
   cardStructureResult?: CardStructureResult | null;
+  matchResult?:        MatchOutput | null;
 }
 
-export function DebugPanel({ canvases, processingTime, confidence, failReason, hashDebug, debugStats, cardStructureResult }: Props) {
+export function DebugPanel({
+  canvases,
+  processingTime,
+  confidence,
+  failReason,
+  hashDebug,
+  debugStats,
+  cardStructureResult,
+  matchResult,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -34,8 +45,11 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
     });
   }, [canvases]);
 
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+
   return (
     <div className="flex flex-col gap-4 p-4 border border-border rounded-xl bg-black/40">
+
       {/* Scalar metrics row */}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono text-muted-foreground">
         <span>TIME: <span className="text-primary">{processingTime}ms</span></span>
@@ -44,7 +58,34 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
         {failReason && <span className="text-destructive">ERR: {failReason}</span>}
       </div>
 
-      {/* Card structure validation scores (populated after capture) */}
+      {/* Match score breakdown — populated after a successful capture */}
+      {matchResult && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono border-t border-primary/20 pt-2">
+          <span className="text-muted-foreground">
+            HASH MATCH:{' '}
+            <span className={matchResult.bestMatch.hashScore >= 0.7 ? 'text-primary' : matchResult.bestMatch.hashScore >= 0.5 ? 'text-amber-400' : 'text-destructive'}>
+              {pct(matchResult.bestMatch.hashScore)}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            COLOR MATCH:{' '}
+            <span className={matchResult.bestMatch.colourScore >= 0.7 ? 'text-primary' : matchResult.bestMatch.colourScore >= 0.5 ? 'text-amber-400' : 'text-destructive'}>
+              {pct(matchResult.bestMatch.colourScore)}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            FINAL SCORE:{' '}
+            <span className={matchResult.bestMatch.combinedScore >= 0.7 ? 'text-primary' : matchResult.bestMatch.combinedScore >= 0.5 ? 'text-amber-400' : 'text-destructive'}>
+              {pct(matchResult.bestMatch.combinedScore)}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            MODE: <span className="text-primary/80">{matchResult.winningCropMode}</span>
+          </span>
+        </div>
+      )}
+
+      {/* Card structure validation scores */}
       {cardStructureResult && (
         <div className={`flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-mono border-t pt-2 ${
           cardStructureResult.pass ? 'border-green-800/40 text-green-400/70' : 'border-red-800/40 text-red-400/70'

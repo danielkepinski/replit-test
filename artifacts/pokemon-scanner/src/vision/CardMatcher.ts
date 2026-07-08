@@ -1,21 +1,31 @@
 import { CardFingerprint } from '../data/fingerprintDb';
 import { hammingDistance } from '../utils/phash';
+import { ColourSignature, colourDistance } from '../utils/colourSignature';
 import { CropMode, CROP_MODES } from './ArtworkExtractor';
 
 export type { CropMode };
 
 export interface MatchEntry {
-  card:       CardFingerprint;
-  /** Minimum Hamming distance across all three crop-mode comparisons (0 = identical, 63 = max). */
-  distance:   number;
-  /** 0–100 — drops to 0 at distance ≥ 32 (worse-than-random territory). */
-  confidence: number;
+  card:          CardFingerprint;
+  /** Hamming distance of the winning crop mode (0 = identical, 63 = max). */
+  distance:      number;
+  /** Combined confidence 0–100 (combinedScore × 100). */
+  confidence:    number;
+  /** Hash similarity of the winning mode, 0–1. */
+  hashScore:     number;
+  /** Colour similarity of the winning mode, 0–1.
+   *  Equals hashScore when colour data is unavailable (graceful fallback). */
+  colourScore:   number;
+  /** Weighted combined score, 0–1.
+   *  hashScore × 0.65 + colourScore × 0.35  when colour available;
+   *  hashScore                               when colour unavailable. */
+  combinedScore: number;
 }
 
 export interface MatchOutput {
   bestMatch:       MatchEntry;
   alternatives:    MatchEntry[];
-  /** Which crop mode produced the winning (lowest) distance for the best match. */
+  /** Crop mode that produced the highest combined score for the best match. */
   winningCropMode: CropMode;
   /** Total cards in the searched index. */
   indexSize:       number;
@@ -23,70 +33,105 @@ export interface MatchOutput {
   searchTime:      number;
 }
 
-/**
- * Key into a CardFingerprint for a given crop mode.
- * e.g. 'classic' → 'classicHash'
- */
+// ── Helpers ────────────────────────────────────────────────────────────────
+
 function hashKey(mode: CropMode): 'classicHash' | 'fullArtHash' | 'borderlessHash' {
   return `${mode}Hash` as 'classicHash' | 'fullArtHash' | 'borderlessHash';
 }
 
+function colourKey(mode: CropMode): 'classicColor' | 'fullArtColor' | 'borderlessColor' {
+  return `${mode}Color` as 'classicColor' | 'fullArtColor' | 'borderlessColor';
+}
+
+// ── Main matcher ───────────────────────────────────────────────────────────
+
 /**
- * Linear Hamming-distance scan across the full fingerprint index.
+ * Linear scan across the full fingerprint index using a combined
+ * hash + colour score.
  *
- * For each card, computes one distance per crop mode (classic, fullArt,
- * borderless) — matching the same-mode query hash against the same-mode
- * stored hash.  The minimum across the three modes is used as the card's
- * overall distance, so:
- *   • Classic cards win on their classic crop.
- *   • Full-art / ex cards win on their fullArt or borderless crop.
+ * For each card, each crop mode is scored independently:
  *
- * Performance: 3 × 20 000 BigInt XOR + popcount ≈ 1–4 ms in modern browsers.
+ *   hashSim   = max(0, (32 − hammingDist) / 32)           → [0, 1]
+ *   colourSim = 1 − colourDistance(query, stored)         → [0, 1]
  *
- * Confidence formula:
- *   conf = max(0, (32 − distance) / 32) × 100
- *   → 100 % at distance 0  (identical hash)
- *   → 50 %  at distance 16
- *   → 0 %   at distance ≥ 32 (statistically random)
+ *   modeScore = hashSim × 0.65 + colourSim × 0.35   (colour available)
+ *             = hashSim                               (colour unavailable)
+ *
+ * The mode with the highest modeScore wins for that card.
+ * Cards are ranked by their winning modeScore (descending).
+ *
+ * Performance:  3 × N BigInt XOR + N × 3 × ~20 float ops.
+ * At N = 20 000: well under 10 ms in modern browsers.
+ *
+ * Backwards compatibility: cards whose stored colourColor fields are null
+ * (pre-v3 fingerprints) fall back to hash-only scoring automatically.
  */
 export function matchCard(
-  queryHashes: Record<CropMode, bigint>,
-  index:       CardFingerprint[],
+  queryHashes:  Record<CropMode, bigint>,
+  queryColours: Record<CropMode, ColourSignature | null> | null,
+  index:        CardFingerprint[],
   topN = 6,
 ): MatchOutput {
   const t0 = performance.now();
 
-  // Pre-parse all stored hashes once outside the card loop
-  const results: MatchEntry[] = index.map(card => {
-    let bestDist = Infinity;
+  type Scored = MatchEntry & { _mode: CropMode };
+
+  const results: Scored[] = index.map(card => {
+    let bestScore    = -1;
+    let bestMode:    CropMode = 'classic';
+    let bestHash     = 0;
+    let bestColour   = 0;
+    let bestDist     = 63;
 
     for (const mode of CROP_MODES) {
-      const storedHex  = card[hashKey(mode)];
-      const storedHash = BigInt('0x' + storedHex);
+      const storedHash = BigInt('0x' + card[hashKey(mode)]);
       const dist       = hammingDistance(queryHashes[mode], storedHash);
-      if (dist < bestDist) bestDist = dist;
+      const hashSim    = Math.max(0, (32 - dist) / 32);
+
+      const storedColour = card[colourKey(mode)];
+      const queryColour  = queryColours?.[mode] ?? null;
+      const hasColour    = storedColour !== null && queryColour !== null;
+
+      const colourSim = hasColour
+        ? 1 - colourDistance(queryColour!, storedColour!)
+        : hashSim; // neutral proxy — keeps scale consistent
+
+      const combined = hasColour
+        ? hashSim * 0.65 + colourSim * 0.35
+        : hashSim;
+
+      if (combined > bestScore) {
+        bestScore  = combined;
+        bestMode   = mode;
+        bestHash   = hashSim;
+        bestColour = colourSim;
+        bestDist   = dist;
+      }
     }
 
-    const dist = bestDist;
-    const conf = Math.max(0, (32 - dist) / 32 * 100);
-    return { card, distance: dist, confidence: conf };
+    return {
+      card,
+      distance:      bestDist,
+      confidence:    bestScore * 100,
+      hashScore:     bestHash,
+      colourScore:   bestColour,
+      combinedScore: bestScore,
+      _mode:         bestMode,
+    };
   });
 
-  results.sort((a, b) => a.distance - b.distance);
+  // Sort descending by combined score
+  results.sort((a, b) => b.combinedScore - a.combinedScore);
 
-  // Determine which crop mode produced the best match for the top result
-  const topCard   = results[0].card;
-  let winMode: CropMode = 'classic';
-  let winDist = Infinity;
-  for (const mode of CROP_MODES) {
-    const storedHash = BigInt('0x' + topCard[hashKey(mode)]);
-    const dist       = hammingDistance(queryHashes[mode], storedHash);
-    if (dist < winDist) { winDist = dist; winMode = mode; }
-  }
+  const best    = results[0];
+  const winMode = best._mode;
+
+  // Strip internal field before returning
+  const clean = ({ _mode: _m, ...rest }: Scored): MatchEntry => rest;
 
   return {
-    bestMatch:       results[0],
-    alternatives:    results.slice(1, topN),
+    bestMatch:       clean(best),
+    alternatives:    results.slice(1, topN).map(clean),
     winningCropMode: winMode,
     indexSize:       index.length,
     searchTime:      performance.now() - t0,
