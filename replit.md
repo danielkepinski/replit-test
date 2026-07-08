@@ -4,8 +4,11 @@ A browser-based Pokémon card scanner that uses real computer vision to detect, 
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/pokemon-scanner run dev` — run the frontend (port auto-assigned)
+- The app runs via the `artifacts/pokemon-scanner: web` workflow (managed by the artifact system) and is served at the root preview path `/`.
+- `pnpm --filter @workspace/pokemon-scanner run dev` — run the frontend manually if needed (port auto-assigned)
 - `pnpm run typecheck` — full typecheck across all packages
+- Requires camera permission in the browser to scan cards; this is expected and not an error.
+- The workspace also registers `api-server` and `mockup-sandbox` artifacts (standard platform scaffolding); they are not required to run or use the scanner.
 
 ## Stack
 

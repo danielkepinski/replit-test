@@ -9,28 +9,6 @@ args = ["pnpm", "store", "prune"]
 env = { "CI" = "true" }
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Pokémon Card Scanner"
-
-[[workflows.workflow]]
-name = "Pokémon Card Scanner"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "PORT=25823 BASE_PATH=/ pnpm --filter @workspace/pokemon-scanner run dev"
-waitForPort = 25823
 
 [agent]
 stack = "PNPM_WORKSPACE"
