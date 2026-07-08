@@ -82,6 +82,12 @@ export function DebugPanel({
           <span className="text-muted-foreground">
             MODE: <span className="text-primary/80">{matchResult.winningCropMode}</span>
           </span>
+          <span className="text-muted-foreground">
+            HASH WEIGHT: <span className="text-primary/80">{(matchResult.hashWeight * 100).toFixed(0)}%</span>
+          </span>
+          <span className="text-muted-foreground">
+            COLOUR WEIGHT: <span className="text-primary/80">{(matchResult.colourWeight * 100).toFixed(0)}%</span>
+          </span>
         </div>
       )}
 
