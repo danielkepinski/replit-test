@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { DetectDebugStats } from '../vision/CardDetector';
 import { CardStructureResult } from '../vision/CardStructureValidator';
 import { MatchOutput } from '../vision/CardMatcher';
+import { CropSource } from '../hooks/useScanner';
 
 interface Props {
   canvases: {
@@ -18,6 +19,7 @@ interface Props {
   debugStats:          DetectDebugStats;
   cardStructureResult?: CardStructureResult | null;
   matchResult?:        MatchOutput | null;
+  cropSource?:         CropSource;
 }
 
 export function DebugPanel({
@@ -29,6 +31,7 @@ export function DebugPanel({
   debugStats,
   cardStructureResult,
   matchResult,
+  cropSource,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +58,14 @@ export function DebugPanel({
         <span>TIME: <span className="text-primary">{processingTime}ms</span></span>
         <span>CONF: <span className="text-primary">{(confidence * 100).toFixed(1)}%</span></span>
         <span>HASH: <span className="text-primary">{hashDebug || '-'}</span></span>
+        {cropSource && (
+          <span>
+            CROP SOURCE:{' '}
+            <span className={cropSource === 'fallback' ? 'text-amber-400' : 'text-primary'}>
+              {cropSource === 'fallback' ? 'FALLBACK (centered)' : 'PERSPECTIVE'}
+            </span>
+          </span>
+        )}
         {failReason && <span className="text-destructive">ERR: {failReason}</span>}
       </div>
 
@@ -144,7 +155,9 @@ export function DebugPanel({
           <div className="canvas-container w-full aspect-video bg-black/50 rounded" />
         </div>
         <div className="flex flex-col gap-1">
-          <span className="text-[10px] text-muted-foreground font-mono">CORRECTED CROP</span>
+          <span className="text-[10px] text-muted-foreground font-mono">
+            {cropSource === 'fallback' ? 'FALLBACK CROP (centered)' : 'CORRECTED CROP'}
+          </span>
           <div className="canvas-container w-full aspect-[2.5/3.5] bg-black/50 rounded" />
         </div>
         <div className="flex flex-col gap-1 col-span-2">

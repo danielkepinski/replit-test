@@ -122,6 +122,7 @@ export function ScannerPage() {
             debugStats={scanner.debugStats}
             cardStructureResult={scanner.cardStructureResult}
             matchResult={scanner.matchResult}
+            cropSource={scanner.cropSource}
           />
         </div>
       </main>
