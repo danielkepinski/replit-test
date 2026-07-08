@@ -239,12 +239,21 @@ function scoreCandidate(
   const cornerScore = cosines.reduce((sum, c) => sum + (1 - Math.abs(c)), 0) / 4;
 
   // ── Area score ───────────────────────────────────────────────────────────
+  // Peak at 25 % of frame (arm's-length card).  Small cards (5–15 %) earn a
+  // real partial score so they survive; very large blobs (> 70 %) are penalised.
+  // Area only contributes 10 % of totalScore, so small cards are still ranked
+  // primarily by rectangularity and corner quality, not rejected outright.
   const areaFrac = contourArea / frameArea;
   let areaScore: number;
-  if (areaFrac <= 0.65) {
-    areaScore = Math.min(areaFrac / 0.30, 1.0);
+  if (areaFrac <= 0.25) {
+    // Linear rise: 0 at 0 %, 1.0 at 25 %
+    areaScore = areaFrac / 0.25;
+  } else if (areaFrac <= 0.70) {
+    // Plateau — anything from a close-up card to a comfortably-framed card
+    areaScore = 1.0;
   } else {
-    areaScore = Math.max(0, 1.0 - (areaFrac - 0.65) / 0.35);
+    // Above 70 %: likely the camera background or a hand+card blob
+    areaScore = Math.max(0, 1.0 - (areaFrac - 0.70) / 0.30);
   }
 
   const totalScore =
@@ -317,7 +326,10 @@ export function detectCard(
   workCanvas.getContext('2d')!.drawImage(origCanvas, 0, 0, workW, workH);
 
   const frameArea = workW * workH;
-  const MIN_AREA  = frameArea * 0.05; // card must cover ≥ 5 % of frame
+  // Reject only truly tiny noise fragments.  A real card held at arm's
+  // length can occupy as little as 3–5 % of frame area; 0.5 % keeps those
+  // candidates alive while still discarding pixel-level specks.
+  const MIN_AREA  = frameArea * 0.005;
 
   let src: any, gray: any, blurred: any, edges: any, processed: any;
   let closeKernel: any, dilateKernel: any;
