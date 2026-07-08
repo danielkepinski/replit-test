@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { detectCard, Point } from '../vision/CardDetector';
 import { correctPerspective } from '../vision/PerspectiveCorrector';
-import { normalizeImage } from '../vision/ImageNormalizer';
+import { normalizeCard } from '../vision/CardNormalizer';
 import { computePHash } from '../utils/phash';
 import { matchCard, MatchOutput } from '../vision/CardMatcher';
 import { getFingerprintIndex } from '../data/fingerprintDb';
@@ -34,10 +34,11 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const [debugStats, setDebugStats]     = useState<DetectDebugStats>(emptyStats);
 
   const debugCanvases = useRef({
-    original: document.createElement('canvas'),
-    edges:    document.createElement('canvas'),
-    rect:     document.createElement('canvas'),
-    crop:     document.createElement('canvas'),
+    original:   document.createElement('canvas'),
+    edges:      document.createElement('canvas'),
+    rect:       document.createElement('canvas'),
+    crop:       document.createElement('canvas'),
+    normalized: document.createElement('canvas'),
   });
 
   const requestRef     = useRef<number>(0);
@@ -76,15 +77,20 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
     const t0 = performance.now();
 
     try {
-      const cropped    = correctPerspective(videoRef.current, detectedCorners, debugCanvases.current.crop);
-      const normalized = normalizeImage(cropped);
+      // 1. Perspective-correct the card from the video frame
+      const corrected     = correctPerspective(videoRef.current, detectedCorners, debugCanvases.current.crop);
 
-      const pHashCanvas   = document.createElement('canvas');
-      pHashCanvas.width   = 400;
-      pHashCanvas.height  = 560;
-      pHashCanvas.getContext('2d')!.putImageData(normalized, 0, 0);
+      // 2. Normalize to fixed 488×680 — matches pokemontcg.io reference aspect ratio
+      const normCanvas    = normalizeCard(corrected);
 
-      const artworkCanvas = extractArtwork(pHashCanvas);
+      // Blit normalized canvas into the debug slot so DebugPanel can display it
+      const normDebug     = debugCanvases.current.normalized;
+      normDebug.width     = normCanvas.width;
+      normDebug.height    = normCanvas.height;
+      normDebug.getContext('2d')!.drawImage(normCanvas, 0, 0);
+
+      // 3. Crop illustration window → 4. resize to 32×32 → 5. pHash
+      const artworkCanvas = extractArtwork(normCanvas);
       const smallImgData  = imageToGrayscale32x32(artworkCanvas);
       const hash          = computePHash(smallImgData);
       setHashDebug(hash.toString(16).padStart(16, '0'));

@@ -7,6 +7,7 @@ interface Props {
     edges: HTMLCanvasElement;
     rect: HTMLCanvasElement;
     crop: HTMLCanvasElement;
+    normalized: HTMLCanvasElement;
   };
   processingTime: number;
   confidence: number;
@@ -21,7 +22,7 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
   useEffect(() => {
     if (!containerRef.current) return;
     const containers = containerRef.current.querySelectorAll('.canvas-container');
-    [canvases.original, canvases.edges, canvases.rect, canvases.crop].forEach((canvas, i) => {
+    [canvases.original, canvases.edges, canvases.rect, canvases.crop, canvases.normalized].forEach((canvas, i) => {
       const container = containers[i];
       if (container) {
         container.innerHTML = '';
@@ -74,6 +75,10 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
         <div className="flex flex-col gap-1">
           <span className="text-[10px] text-muted-foreground font-mono">CORRECTED CROP</span>
           <div className="canvas-container w-full aspect-[2.5/3.5] bg-black/50 rounded" />
+        </div>
+        <div className="flex flex-col gap-1 col-span-2">
+          <span className="text-[10px] text-muted-foreground font-mono">NORMALIZED CARD (488×680 → ArtworkExtractor input)</span>
+          <div className="canvas-container w-full max-w-[244px] aspect-[488/680] bg-black/50 rounded" />
         </div>
       </div>
     </div>
