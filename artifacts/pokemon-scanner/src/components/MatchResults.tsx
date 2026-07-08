@@ -9,7 +9,7 @@ interface Props {
 export function MatchResults({ result, onScanAgain }: Props) {
   if (!result) return null;
 
-  const { bestMatch, alternatives, indexSize, searchTime, winningCropMode } = result;
+  const { bestMatch, alternatives, indexSize, searchTime, winningCropMode, hashWeight, colourWeight } = result;
   const { card, distance, confidence, hashScore, colourScore, combinedScore } = bestMatch;
 
   const scoreColor = (v: number) =>
@@ -72,6 +72,14 @@ export function MatchResults({ result, onScanAgain }: Props) {
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Mode</span>
                 <span className="text-primary/80">{winningCropMode}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Hash weight</span>
+                <span className="text-primary/80">{(hashWeight * 100).toFixed(0)}%</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Colour weight</span>
+                <span className="text-primary/80">{(colourWeight * 100).toFixed(0)}%</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Hamming dist</span>
