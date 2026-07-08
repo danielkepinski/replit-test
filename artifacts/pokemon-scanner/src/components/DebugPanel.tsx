@@ -50,6 +50,10 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
         <span>REJ/PTS: <span className="text-amber-500/70">{debugStats.rejectedByPoints}</span></span>
         <span>REJ/RATIO: <span className="text-amber-500/70">{debugStats.rejectedByAspectRatio}</span></span>
         <span>REJ/CONV: <span className="text-amber-500/70">{debugStats.rejectedByConvexity}</span></span>
+        <span>REJ/EDGE: <span className="text-amber-500/70">{debugStats.rejectedByEdge}</span></span>
+        {debugStats.bestScore !== null && (
+          <span>SCORE: <span className="text-primary/70">{(debugStats.bestScore * 100).toFixed(1)}%</span></span>
+        )}
         {debugStats.usedFallback && <span className="text-amber-400">FALLBACK</span>}
         {debugStats.selectedRect && (
           <span className="text-primary/70">

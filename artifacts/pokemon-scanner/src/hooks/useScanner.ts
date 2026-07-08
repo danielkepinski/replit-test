@@ -19,8 +19,10 @@ const emptyStats = (): DetectDebugStats => ({
   rejectedByPoints: 0,
   rejectedByAspectRatio: 0,
   rejectedByConvexity: 0,
+  rejectedByEdge: 0,
   selectedRect: null,
   usedFallback: false,
+  bestScore: null,
 });
 
 export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
