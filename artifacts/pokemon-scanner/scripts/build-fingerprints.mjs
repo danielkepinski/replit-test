@@ -195,9 +195,48 @@ async function hashImageUrl(url) {
 }
 
 // ── pokemontcg.io API ────────────────────────────────────────────────────────
-const API_BASE  = 'https://api.pokemontcg.io/v2';
+const API_BASE   = 'https://api.pokemontcg.io/v2';
 const META_CACHE = path.resolve(ROOT, '.cache/card-meta.json');
 const META_TTL_MS = 24 * 60 * 60 * 1000; // 1 day
+
+/**
+ * Try to derive card metadata from an existing fingerprints.json.
+ *
+ * Each fingerprint entry already contains every field needed to re-download
+ * and re-hash the card image: id, name, set, number, imageUrl.  When this
+ * file is present and populated we can skip the pokemontcg.io API entirely.
+ *
+ * Returns the cards array (normalised to { id, name, set, number, imageUrl })
+ * or null when the file is absent / unusable.
+ */
+async function tryMetaFromFingerprints() {
+  if (!existsSync(OUT_PATH)) return null;
+  try {
+    const raw  = await readFile(OUT_PATH, 'utf8');
+    const db   = JSON.parse(raw);
+    const cards = (db.cards ?? []).filter(c => c.id && c.imageUrl);
+    if (cards.length === 0) return null;
+
+    // Optionally filter to the requested sets
+    const filtered = ONLY_SETS.length
+      ? cards.filter(c => ONLY_SETS.some(s => c.id.startsWith(s + '-')))
+      : cards;
+
+    // Normalise: set is already a plain string in fingerprint entries
+    const meta = filtered.map(c => ({
+      id:       c.id,
+      name:     c.name,
+      set:      c.set,       // string, e.g. "Base Set"
+      number:   c.number,
+      imageUrl: c.imageUrl,
+    }));
+
+    console.log(`  Metadata: using fingerprints.json (${meta.length} cards) — skipping API`);
+    return isFinite(LIMIT) ? meta.slice(0, LIMIT) : meta;
+  } catch {
+    return null;
+  }
+}
 
 async function fetchCardsPage(page, pageSize = 250) {
   const params = new URLSearchParams({
@@ -217,14 +256,22 @@ async function fetchCardsPage(page, pageSize = 250) {
 }
 
 async function fetchAllCardMeta() {
-  // Use cached metadata when available (avoids 10+ minutes of API pagination on resume)
+  // ── Prefer fingerprints.json as the metadata source ─────────────────────────
+  // When it exists and contains imageUrl fields there is no need to hit the
+  // pokemontcg.io API at all.  This allows offline rebuilds and avoids 404s
+  // when the API is unavailable.
+  const fromFingerprints = await tryMetaFromFingerprints();
+  if (fromFingerprints) return fromFingerprints;
+
+  // ── Fall back to pokemontcg.io API ──────────────────────────────────────────
+  // Use cached metadata when available (avoids 10+ minutes of API pagination)
   const cacheKey = ONLY_SETS.length ? ONLY_SETS.join(',') : 'all';
   if (!ONLY_SETS.length && existsSync(META_CACHE)) {
     try {
       const raw   = await readFile(META_CACHE, 'utf8');
       const cache = JSON.parse(raw);
       if (cache.key === cacheKey && Date.now() - cache.fetchedAt < META_TTL_MS) {
-        console.log(`  Metadata: using cached list (${cache.cards.length} cards, fetched ${new Date(cache.fetchedAt).toISOString()})`);
+        console.log(`  Metadata: using disk cache (${cache.cards.length} cards, fetched ${new Date(cache.fetchedAt).toISOString()})`);
         return isFinite(LIMIT) ? cache.cards.slice(0, LIMIT) : cache.cards;
       }
     } catch { /* ignore bad cache */ }
@@ -337,7 +384,11 @@ async function loadExisting() {
   }
 
   const tasks = todo.map(card => async () => {
-    const imageUrl = card.images?.small;
+    // Support both shapes:
+    //   fingerprints.json entry  → card.imageUrl (string), card.set (string)
+    //   pokemontcg.io API entry  → card.images.small (string), card.set.name (string)
+    const imageUrl = card.imageUrl ?? card.images?.small;
+    const setName  = typeof card.set === 'string' ? card.set : (card.set?.name ?? '');
     if (!imageUrl) {
       errs++;
       return;
@@ -347,7 +398,7 @@ async function loadExisting() {
       results.set(card.id, {
         id:       card.id,
         name:     card.name,
-        set:      card.set?.name ?? '',
+        set:      setName,
         number:   card.number ?? '',
         imageUrl,
         ...hashes,
