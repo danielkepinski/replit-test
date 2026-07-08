@@ -114,6 +114,7 @@ export function ScannerPage() {
             failReason={scanner.failReason}
             hashDebug={scanner.hashDebug}
             debugStats={scanner.debugStats}
+            cardStructureResult={scanner.cardStructureResult}
           />
         </div>
       </main>

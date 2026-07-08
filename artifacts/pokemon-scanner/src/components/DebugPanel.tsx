@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { DetectDebugStats } from '../vision/CardDetector';
+import { CardStructureResult } from '../vision/CardStructureValidator';
 
 interface Props {
   canvases: {
@@ -14,9 +15,10 @@ interface Props {
   failReason: string | null;
   hashDebug: string;
   debugStats: DetectDebugStats;
+  cardStructureResult?: CardStructureResult | null;
 }
 
-export function DebugPanel({ canvases, processingTime, confidence, failReason, hashDebug, debugStats }: Props) {
+export function DebugPanel({ canvases, processingTime, confidence, failReason, hashDebug, debugStats, cardStructureResult }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,6 +43,24 @@ export function DebugPanel({ canvases, processingTime, confidence, failReason, h
         <span>HASH: <span className="text-primary">{hashDebug || '-'}</span></span>
         {failReason && <span className="text-destructive">ERR: {failReason}</span>}
       </div>
+
+      {/* Card structure validation scores (populated after capture) */}
+      {cardStructureResult && (
+        <div className={`flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-mono border-t pt-2 ${
+          cardStructureResult.pass ? 'border-green-800/40 text-green-400/70' : 'border-red-800/40 text-red-400/70'
+        }`}>
+          <span className="font-semibold">
+            CARD_STRUCTURE: {cardStructureResult.pass ? 'PASS' : 'FAIL'}
+          </span>
+          <span>SCORE: <span className="text-inherit">{(cardStructureResult.score * 100).toFixed(0)}%</span></span>
+          <span>SHARP: <span className="text-inherit">{(cardStructureResult.sharpnessScore * 100).toFixed(0)}%</span></span>
+          <span>BORDER: <span className="text-inherit">{(cardStructureResult.borderScore * 100).toFixed(0)}%</span></span>
+          <span>LAYOUT: <span className="text-inherit">{(cardStructureResult.structureScore * 100).toFixed(0)}%</span></span>
+          {!cardStructureResult.pass && cardStructureResult.reason && (
+            <span className="text-red-400/90">→ {cardStructureResult.reason}</span>
+          )}
+        </div>
+      )}
 
       {/* Contour pipeline stats */}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-mono text-muted-foreground/70 border-t border-border/30 pt-2">

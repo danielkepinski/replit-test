@@ -8,6 +8,7 @@ import { getFingerprintIndex } from '../data/fingerprintDb';
 import { imageToGrayscale32x32 } from '../utils/canvasUtils';
 import { extractArtwork } from '../vision/ArtworkExtractor';
 import { DetectDebugStats } from '../vision/CardDetector';
+import { validateCardStructure, CardStructureResult } from '../vision/CardStructureValidator';
 
 export type ScanState = 'idle' | 'detecting' | 'processing' | 'matched' | 'error';
 
@@ -34,6 +35,7 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const [detectedCorners, setDetectedCorners] = useState<Point[] | null>(null);
   const [hashDebug, setHashDebug]       = useState<string>('');
   const [debugStats, setDebugStats]     = useState<DetectDebugStats>(emptyStats);
+  const [cardStructureResult, setCardStructureResult] = useState<CardStructureResult | null>(null);
 
   const debugCanvases = useRef({
     original:   document.createElement('canvas'),
@@ -91,7 +93,18 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
       normDebug.height    = normCanvas.height;
       normDebug.getContext('2d')!.drawImage(normCanvas, 0, 0);
 
-      // 3. Crop illustration window → 4. resize to 32×32 → 5. pHash
+      // 3. Post-perspective card structure validation
+      //    Rejects non-cards (tattoos, signs, plain rectangles) before hashing
+      const structResult = validateCardStructure(normCanvas);
+      setCardStructureResult(structResult);
+      if (!structResult.pass) {
+        setFailReason(structResult.reason ?? 'Not a Pokémon card');
+        setProcessingTime(Math.round(performance.now() - t0));
+        setState('error');
+        return;
+      }
+
+      // 4. Crop illustration window → 5. resize to 32×32 → 6. pHash
       const artworkCanvas = extractArtwork(normCanvas);
       const smallImgData  = imageToGrayscale32x32(artworkCanvas);
       const hash          = computePHash(smallImgData);
@@ -119,6 +132,7 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
     setDetectedCorners(null);
     setHashDebug('');
     setDebugStats(emptyStats());
+    setCardStructureResult(null);
   }, []);
 
   const startDetection = useCallback(() => {
@@ -135,6 +149,7 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
     debugCanvases: debugCanvases.current,
     hashDebug,
     debugStats,
+    cardStructureResult,
     capture,
     reset,
     startDetection,
