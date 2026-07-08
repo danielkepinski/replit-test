@@ -17,10 +17,9 @@
  *    75 %) to capture more of the lower card artwork — modern ex / full-art
  *    cards often keep illustration running almost to the attack box, and the
  *    old 75 % cutoff left the crop too similar to the classic illustration
- *    box, letting `classic` win ties it shouldn't. NOTE: build-fingerprints.mjs
- *    intentionally still uses the old 75 % window (fingerprints are not being
- *    rebuilt); pHash is coarse-grained enough to tolerate this small mismatch,
- *    and CardMatcher applies a small mode-preference bias (see MODE_BIAS) to
+ *    box, letting `classic` win ties it shouldn't. build-fingerprints.mjs
+ *    mirrors this same 83 % window (fingerprints were rebuilt); CardMatcher
+ *    also applies a small mode-preference bias (see MODE_TIEBREAK_BONUS) to
  *    help fullArt/borderless win genuine near-ties against classic.
  *
  *  borderless x: 2–98 %, y: 2–98 %

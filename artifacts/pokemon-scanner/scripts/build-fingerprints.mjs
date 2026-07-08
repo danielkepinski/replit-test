@@ -75,7 +75,7 @@ async function decodeImageFallback(buffer) {
 // only the crop window differs.
 const CROPS = {
   classic:    { xMin: 0.08, xMax: 0.92, yMin: 0.15, yMax: 0.55 },
-  fullArt:    { xMin: 0.05, xMax: 0.95, yMin: 0.05, yMax: 0.75 },
+  fullArt:    { xMin: 0.05, xMax: 0.95, yMin: 0.05, yMax: 0.83 },
   borderless: { xMin: 0.02, xMax: 0.98, yMin: 0.02, yMax: 0.98 },
 };
 
@@ -312,7 +312,7 @@ async function tryMetaFromFingerprints() {
   }
 }
 
-async function fetchCardsPage(page, pageSize = 250) {
+async function fetchCardsPage(page, pageSize = 250, retries = 4) {
   const params = new URLSearchParams({
     page:     String(page),
     pageSize: String(pageSize),
@@ -324,9 +324,25 @@ async function fetchCardsPage(page, pageSize = 250) {
     params.set('q', ONLY_SETS.map(s => `set.id:${s}`).join(' OR '));
   }
   const url = `${API_BASE}/cards?${params}`;
-  const res  = await fetch(url, { headers: { 'User-Agent': 'pokemon-scanner-builder/1.0' } });
-  if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`);
-  return res.json();
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, { headers: { 'User-Agent': 'pokemon-scanner-builder/1.0' } });
+    if (res.ok) return res.json();
+    // The public API is flaky under concurrent load (transient 502/503/504
+    // gateway errors from its Cloudflare front-end) — retry with backoff
+    // before giving up. Non-5xx errors (e.g. 4xx) fail immediately.
+    const bodyText = await res.text();
+    // The public API's Cloudflare front-end is flaky under concurrent load —
+    // it intermittently returns 5xx *and* spurious 404s for pages that do
+    // exist (confirmed by re-fetching the same page number succeeding on
+    // retry). Retry any non-2xx here rather than failing the whole run.
+    if (attempt < retries) {
+      const delay = 500 * 2 ** attempt;
+      console.warn(`\n  ⚠ page ${page}: HTTP ${res.status}, retrying in ${delay}ms (attempt ${attempt + 1}/${retries})`);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+    throw new Error(`API error ${res.status}: ${bodyText}`);
+  }
 }
 
 async function fetchAllCardMeta() {
@@ -373,7 +389,7 @@ async function fetchAllCardMeta() {
         process.stdout.write(`  Metadata: page ${pagesReceived}/${totalPages}\r`);
       }
     }
-    await Promise.all(Array.from({ length: Math.min(8, pageNums.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(4, pageNums.length) }, worker));
     return out;
   })();
   console.log();
