@@ -13,6 +13,18 @@ import { extractColourSignature, ColourSignature } from '../utils/colourSignatur
 
 export type ScanState = 'idle' | 'detecting' | 'processing' | 'matched' | 'error';
 
+/** Below this sharpnessScore (from the existing structure validator), a
+ *  failed capture is reported to the user as "too blurry" rather than the
+ *  more generic border/layout wording. Purely a UI-copy classification —
+ *  does not change CardStructureValidator's pass/fail scoring. */
+const BLUR_SHARPNESS_THRESHOLD = 0.25;
+
+/** Below this confidence (%), a technically-produced match is treated as a
+ *  scan failure ("low confidence / unclear card") rather than shown as a
+ *  result. Reads matchCard's existing confidence output; matching logic
+ *  itself is unchanged. */
+const LOW_CONFIDENCE_THRESHOLD = 50;
+
 const emptyStats = (): DetectDebugStats => ({
   rawContourCount: 0,
   externalContourCount: 0,
@@ -61,7 +73,11 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
       setConfidence(result.confidence);
       setDetectedCorners(result.corners);
       setDebugStats(result.debugStats);
+      // Keep failReason fresh: clear it on a successful detect so a later
+      // "no card shape" capture can't inherit a stale reason from an
+      // earlier, now-resolved frame.
       if (result.failReason) setFailReason(result.failReason);
+      else if (result.corners) setFailReason(null);
       lastDetectTime.current = time;
     }
     requestRef.current = requestAnimationFrame(detectLoop);
@@ -77,7 +93,24 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
   }, [state, detectLoop]);
 
   const capture = useCallback(async () => {
-    if (!videoRef.current || !detectedCorners) return;
+    // The Scan button is always tappable now (see ScanButton) — capture is
+    // responsible for explaining *why* it can't produce a match rather than
+    // being gated behind detection state. Each branch below reuses reasons
+    // already produced by the existing detection/validation/matching
+    // pipeline; no detection or matching logic is changed here.
+    if (!videoRef.current || !videoRef.current.videoWidth) {
+      setFailReason('Video not ready');
+      setState('error');
+      return;
+    }
+    if (!detectedCorners) {
+      // Reuse whatever the live detection loop last reported (e.g. "No card
+      // shape detected"); fall back to a sensible default if it hasn't run yet.
+      setFailReason(failReason ?? 'No card shape detected');
+      setState('error');
+      return;
+    }
+
     setState('processing');
     const t0 = performance.now();
 
@@ -99,7 +132,14 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
       const structResult = validateCardStructure(normCanvas);
       setCardStructureResult(structResult);
       if (!structResult.pass) {
-        setFailReason(structResult.reason ?? 'Not a Pokémon card');
+        // sharpnessScore is an existing pipeline output (Laplacian variance);
+        // when it's the dominant weak signal, surface "too blurry" instead of
+        // the more generic border/layout wording — no change to the
+        // validator's own pass/fail scoring or thresholds.
+        const reason = structResult.sharpnessScore < BLUR_SHARPNESS_THRESHOLD
+          ? 'Too blurry — hold the camera steady and refocus'
+          : (structResult.reason ?? 'Weak border/layout — card frame not clearly visible');
+        setFailReason(reason);
         setProcessingTime(Math.round(performance.now() - t0));
         setState('error');
         return;
@@ -122,15 +162,30 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
       const output = matchCard(queryHashes, queryColours, index);
       setHashDebug(`[${output.winningCropMode}]`);
       setMatchResult(output);
-
       setProcessingTime(Math.round(performance.now() - t0));
+
+      // matchCard always returns *some* best match from the index (it's a
+      // linear nearest-neighbour scan, not a threshold classifier), so a
+      // weak/ambiguous capture still "matches" something with low
+      // confidence. Surface that as a scan failure instead of presenting an
+      // unreliable result as if it were a confident identification. This
+      // reads the existing confidence output — matchCard's scoring itself is
+      // unchanged.
+      if (output.bestMatch.confidence < LOW_CONFIDENCE_THRESHOLD) {
+        setFailReason(
+          `Low confidence match (${output.bestMatch.confidence.toFixed(0)}%) — unclear card`
+        );
+        setState('error');
+        return;
+      }
+
       setState('matched');
     } catch (err) {
       console.error(err);
       setFailReason(err instanceof Error ? err.message : String(err));
       setState('error');
     }
-  }, [videoRef, detectedCorners]);
+  }, [videoRef, detectedCorners, failReason]);
 
   const reset = useCallback(() => {
     setState('detecting');

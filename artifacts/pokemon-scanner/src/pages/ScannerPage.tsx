@@ -91,8 +91,14 @@ export function ScannerPage() {
             </div>
 
             {scanner.state === 'error' && (
-              <div className="p-4 border border-destructive bg-destructive/10 text-destructive rounded-xl font-mono text-sm text-center">
-                SCAN FAILED: {scanner.failReason}
+              <div
+                className="p-4 border border-destructive bg-destructive/10 text-destructive rounded-xl font-mono text-sm text-center"
+                data-testid="text-scan-error"
+              >
+                <p>Scan failed: {scanner.failReason}</p>
+                <p className="mt-1 text-xs text-destructive/70 normal-case">
+                  Try better lighting, move closer, or place the card flat.
+                </p>
                 <button
                   onClick={scanner.reset}
                   className="block mx-auto mt-2 underline"
