@@ -69,9 +69,15 @@ async function decodeImageFallback(buffer) {
   return jpeg.default.decode(buffer, { useTArray: true }); // { width, height, data }
 }
 
-// ── Artwork crop constants — mirror of ArtworkExtractor.ts ──────────────────
-// x: 8%→92%, y: 15%→55% of the card image (percentage-based, era-agnostic)
-const ARTWORK = { xMin: 0.08, xMax: 0.92, yMin: 0.15, yMax: 0.55 };
+// ── Crop region constants — mirrors of ArtworkExtractor.ts CROP_REGIONS ──────
+// Three regions handle different card eras (classic illustration box,
+// full-art/ex upper area, near-full borderless).  All use the same image;
+// only the crop window differs.
+const CROPS = {
+  classic:    { xMin: 0.08, xMax: 0.92, yMin: 0.15, yMax: 0.55 },
+  fullArt:    { xMin: 0.05, xMax: 0.95, yMin: 0.05, yMax: 0.75 },
+  borderless: { xMin: 0.02, xMax: 0.98, yMin: 0.02, yMax: 0.98 },
+};
 
 // ── Bilinear resize to 32×32 grayscale with optional crop window ─────────────
 // cropX/Y/W/H are in source-image pixels; when omitted the full image is used.
@@ -145,38 +151,47 @@ function computePHash(pixels /* Float64Array 1024 */) {
   return hash.toString(16).padStart(16, '0');
 }
 
-// ── Image URL → artwork-only pHash ───────────────────────────────────────────
+// ── Image URL → multi-crop pHashes ───────────────────────────────────────────
+// Returns { classicHash, fullArtHash, borderlessHash } for a single image.
+// The image buffer is decoded once; all three crops share the same raw pixels.
 async function hashImageUrl(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  let pixels;
+  const hashes = {};
+
   if (sharpFn) {
-    // Read metadata once to compute crop in source pixels, then crop → resize → grayscale
-    const meta   = await sharpFn(buf).metadata();
-    const cropX  = Math.round(ARTWORK.xMin * meta.width);
-    const cropY  = Math.round(ARTWORK.yMin * meta.height);
-    const cropW  = Math.round((ARTWORK.xMax - ARTWORK.xMin) * meta.width);
-    const cropH  = Math.round((ARTWORK.yMax - ARTWORK.yMin) * meta.height);
-    const { data } = await sharpFn(buf)
-      .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
-      .resize(32, 32)
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    pixels = new Float64Array(data.length);
-    for (let i = 0; i < data.length; i++) pixels[i] = data[i];
+    const meta = await sharpFn(buf).metadata();
+    const { width, height } = meta;
+    for (const [mode, crop] of Object.entries(CROPS)) {
+      const cropX = Math.round(crop.xMin * width);
+      const cropY = Math.round(crop.yMin * height);
+      const cropW = Math.round((crop.xMax - crop.xMin) * width);
+      const cropH = Math.round((crop.yMax - crop.yMin) * height);
+      const { data } = await sharpFn(buf)
+        .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
+        .resize(32, 32)
+        .grayscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const pixels = new Float64Array(data.length);
+      for (let i = 0; i < data.length; i++) pixels[i] = data[i];
+      hashes[`${mode}Hash`] = computePHash(pixels);
+    }
   } else {
     const { width, height, data } = await decodeImageFallback(buf);
-    const cropX = Math.round(ARTWORK.xMin * width);
-    const cropY = Math.round(ARTWORK.yMin * height);
-    const cropW = Math.round((ARTWORK.xMax - ARTWORK.xMin) * width);
-    const cropH = Math.round((ARTWORK.yMax - ARTWORK.yMin) * height);
-    pixels = bilinearResize32(data, width, height, cropX, cropY, cropW, cropH);
+    for (const [mode, crop] of Object.entries(CROPS)) {
+      const cropX = Math.round(crop.xMin * width);
+      const cropY = Math.round(crop.yMin * height);
+      const cropW = Math.round((crop.xMax - crop.xMin) * width);
+      const cropH = Math.round((crop.yMax - crop.yMin) * height);
+      const pixels = bilinearResize32(data, width, height, cropX, cropY, cropW, cropH);
+      hashes[`${mode}Hash`] = computePHash(pixels);
+    }
   }
 
-  return computePHash(pixels);
+  return hashes; // { classicHash, fullArtHash, borderlessHash }
 }
 
 // ── pokemontcg.io API ────────────────────────────────────────────────────────
@@ -293,10 +308,15 @@ async function loadExisting() {
   const existing = await loadExisting();
   const allMeta  = await fetchAllCardMeta();
 
-  // Filter to only cards that still need processing
+  // Filter to only cards that still need processing.
+  // Re-process old single-hash entries (only have `hash`, missing the new fields).
+  const ZERO = '0'.repeat(16);
   const todo = allMeta.filter(c => {
     const e = existing.get(c.id);
-    return !e || !e.hash || e.hash === '0'.repeat(16);
+    return !e
+      || !e.classicHash    || e.classicHash    === ZERO
+      || !e.fullArtHash    || e.fullArtHash    === ZERO
+      || !e.borderlessHash || e.borderlessHash === ZERO;
   });
 
   console.log(`Cards to process: ${todo.length} (${existing.size} cached)`);
@@ -323,14 +343,14 @@ async function loadExisting() {
       return;
     }
     try {
-      const hash = await hashImageUrl(imageUrl);
+      const hashes = await hashImageUrl(imageUrl); // { classicHash, fullArtHash, borderlessHash }
       results.set(card.id, {
         id:       card.id,
         name:     card.name,
         set:      card.set?.name ?? '',
         number:   card.number ?? '',
         imageUrl,
-        hash,
+        ...hashes,
       });
       done++;
       if (done % SAVE_INTERVAL === 0) await saveProgress();

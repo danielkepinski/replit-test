@@ -6,7 +6,7 @@ import { computePHash } from '../utils/phash';
 import { matchCard, MatchOutput } from '../vision/CardMatcher';
 import { getFingerprintIndex } from '../data/fingerprintDb';
 import { imageToGrayscale32x32 } from '../utils/canvasUtils';
-import { extractArtwork } from '../vision/ArtworkExtractor';
+import { extractAllCrops, CropMode } from '../vision/ArtworkExtractor';
 import { DetectDebugStats } from '../vision/CardDetector';
 import { validateCardStructure, CardStructureResult } from '../vision/CardStructureValidator';
 
@@ -104,15 +104,21 @@ export function useScanner(videoRef: React.RefObject<HTMLVideoElement | null>) {
         return;
       }
 
-      // 4. Crop illustration window → 5. resize to 32×32 → 6. pHash
-      const artworkCanvas = extractArtwork(normCanvas);
-      const smallImgData  = imageToGrayscale32x32(artworkCanvas);
-      const hash          = computePHash(smallImgData);
-      setHashDebug(hash.toString(16).padStart(16, '0'));
-
-      // Linear scan over the pre-built fingerprint index
+      // 4. Extract all three crop regions → 5. resize each to 32×32 → 6. pHash
+      const crops = extractAllCrops(normCanvas);
+      const queryHashes: Record<CropMode, bigint> = {
+        classic:    computePHash(imageToGrayscale32x32(crops.classic)),
+        fullArt:    computePHash(imageToGrayscale32x32(crops.fullArt)),
+        borderless: computePHash(imageToGrayscale32x32(crops.borderless)),
+      };
+      // Linear scan over the pre-built fingerprint index — best distance wins
       const index  = getFingerprintIndex();
-      const output = matchCard(hash, index);
+      const output = matchCard(queryHashes, index);
+      // Show classic hash + which crop mode produced the best match
+      setHashDebug(
+        queryHashes.classic.toString(16).padStart(16, '0') +
+        ` [${output.winningCropMode}]`
+      );
       setMatchResult(output);
 
       setProcessingTime(Math.round(performance.now() - t0));
