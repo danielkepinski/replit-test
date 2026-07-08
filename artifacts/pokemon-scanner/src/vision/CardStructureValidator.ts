@@ -25,8 +25,12 @@
  *                    header, artwork, and text regions create a characteristic
  *                    vertical rhythm that flat objects lack.
  *
- * Composite: sharpness 20 % + border 35 % + structure 45 %.
- * Pass threshold: 0.28 (lenient to accommodate blurry/tilted captures).
+ * Composite: sharpness 10 % + border 40 % + structure 50 %.
+ * Pass threshold: 0.22.
+ *
+ * Sharpness is intentionally low-weighted because laptop webcam captures are
+ * inherently soft.  A blurry card is still a card — border and layout carry
+ * the real discriminating signal.  Sharpness only contributes a tie-break.
  */
 
 export interface CardStructureResult {
@@ -41,7 +45,7 @@ export interface CardStructureResult {
   reason?: string;
 }
 
-const PASS_THRESHOLD = 0.28;
+const PASS_THRESHOLD = 0.22;
 
 // ── Grayscale helpers ─────────────────────────────────────────────────────────
 
@@ -206,15 +210,19 @@ export function validateCardStructure(canvas: HTMLCanvasElement): CardStructureR
   const borderScore    = computeBorderScore(gray, w, h);
   const structureScore = computeStructureScore(gray, w, h);
 
+  // Sharpness weight is intentionally low (10 %) — soft webcam captures are
+  // still valid cards.  Border and layout carry the real discriminating signal.
   const score =
-    sharpnessScore * 0.20 +
-    borderScore    * 0.35 +
-    structureScore * 0.45;
+    sharpnessScore * 0.10 +
+    borderScore    * 0.40 +
+    structureScore * 0.50;
 
   let reason: string | undefined;
   if (score < PASS_THRESHOLD) {
-    if (sharpnessScore < 0.05) {
-      reason = `Too blurry (sharp ${pct(sharpnessScore)})`;
+    // Sharpness alone is never the sole reason for rejection.
+    // Diagnose the dominant weak signal instead.
+    if (borderScore < 0.12 && structureScore < 0.15) {
+      reason = `No card structure (border ${pct(borderScore)}, layout ${pct(structureScore)})`;
     } else if (structureScore < 0.15) {
       reason = `No card layout (struct ${pct(structureScore)})`;
     } else if (borderScore < 0.12) {
