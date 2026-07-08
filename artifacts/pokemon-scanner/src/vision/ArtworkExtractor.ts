@@ -11,11 +11,17 @@
  *    Strips the name bar (top 15 %), text box, HP, set symbol (below 55 %),
  *    and the left/right border chrome.
  *
- *  fullArt    x: 5–95 %, y: 5–75 %
+ *  fullArt    x: 5–95 %, y: 5–83 %
  *    Full-art / ex / GX / VMAX / VSTAR cards where the illustration bleeds
- *    across the entire upper portion of the card. Extends to y = 75 % to
- *    include the lower artwork of cards whose attack / description box starts
- *    only near the bottom quarter.
+ *    across the entire upper portion of the card. Extends to y = 83 % (was
+ *    75 %) to capture more of the lower card artwork — modern ex / full-art
+ *    cards often keep illustration running almost to the attack box, and the
+ *    old 75 % cutoff left the crop too similar to the classic illustration
+ *    box, letting `classic` win ties it shouldn't. NOTE: build-fingerprints.mjs
+ *    intentionally still uses the old 75 % window (fingerprints are not being
+ *    rebuilt); pHash is coarse-grained enough to tolerate this small mismatch,
+ *    and CardMatcher applies a small mode-preference bias (see MODE_BIAS) to
+ *    help fullArt/borderless win genuine near-ties against classic.
  *
  *  borderless x: 2–98 %, y: 2–98 %
  *    Near-full-card crop used for trainer full-art, alternate-art, and
@@ -44,7 +50,7 @@ export const CROP_REGIONS = {
   },
   fullArt: {
     xMin: 0.05, xMax: 0.95,
-    yMin: 0.05, yMax: 0.75,
+    yMin: 0.05, yMax: 0.83,
   },
   borderless: {
     xMin: 0.02, xMax: 0.98,

@@ -23,6 +23,22 @@ export const MODE_WEIGHTS: Record<CropMode, { hash: number; colour: number }> = 
   borderless: { hash: 0.75, colour: 0.25 },
 };
 
+/**
+ * Small mode-selection tie-break bonus, added only when choosing which
+ * crop mode "wins" for a card — never added to the reported/displayed
+ * score. Modern ex / full-art / borderless cards often score nearly
+ * identically to `classic` (their illustration overlaps the classic
+ * illustration box), so `classic` — evaluated first — tends to win close
+ * calls by default. This nudges fullArt/borderless to win genuine
+ * near-ties without letting them beat classic by a wide margin, so
+ * classic cards (where classic legitimately scores higher) are unaffected.
+ */
+const MODE_TIEBREAK_BONUS: Record<CropMode, number> = {
+  classic:    0,
+  fullArt:    0.03,
+  borderless: 0.02,
+};
+
 export interface MatchEntry {
   card:          CardFingerprint;
   /** Hamming distance of the winning crop mode (0 = identical, 63 = max). */
@@ -100,7 +116,8 @@ export function matchCard(
   type Scored = MatchEntry & { _mode: CropMode };
 
   const results: Scored[] = index.map(card => {
-    let bestScore    = -1;
+    let bestBiased   = -1; // includes MODE_TIEBREAK_BONUS — selection only
+    let bestScore    = -1; // raw combined score — used for reporting/ranking
     let bestMode:    CropMode = 'classic';
     let bestHash     = 0;
     let bestColour   = 0;
@@ -124,7 +141,12 @@ export function matchCard(
         ? hashSim * w.hash + colourSim * w.colour
         : hashSim;
 
-      if (combined > bestScore) {
+      // Tie-break bonus only affects which mode wins for this card — the
+      // reported score (bestScore) stays the true, unbiased combined score.
+      const biased = combined + MODE_TIEBREAK_BONUS[mode];
+
+      if (biased > bestBiased) {
+        bestBiased = biased;
         bestScore  = combined;
         bestMode   = mode;
         bestHash   = hashSim;
