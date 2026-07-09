@@ -13,13 +13,23 @@
  *     { …, classicColor, fullArtColor, borderlessColor }
  *     Each colour field is a 30-char hex string (ColourSignature).
  *
+ *   v4 – Adds regional colour signatures (future — requires fingerprint rebuild):
+ *     { …, classicRegionalColor, fullArtRegionalColor, borderlessRegionalColor }
+ *     Each regional field is a 270-char hex string (RegionalColourSignature,
+ *     9 × ColourSignature blocks in row-major 3×3 grid order).
+ *
  * loadFingerprintIndex() normalises older entries on the fly so matching works
  * without a rebuild; running build-fingerprints.mjs regenerates everything.
  *
  * At runtime the JSON is loaded once via a dynamic import (Vite lazy chunk).
  */
 
-import { ColourSignature, deserializeColour } from '../utils/colourSignature';
+import {
+  ColourSignature,
+  deserializeColour,
+  RegionalColourSignature,
+  deserializeRegionalColour,
+} from '../utils/colourSignature';
 
 // ── Raw JSON shape (any generation) ───────────────────────────────────────
 
@@ -39,6 +49,10 @@ interface RawEntry {
   classicColor?:    string;
   fullArtColor?:    string;
   borderlessColor?: string;
+  /** v4 regional colour-signature fields (270-char hex, 3×3 grid). */
+  classicRegionalColor?:    string;
+  fullArtRegionalColor?:    string;
+  borderlessRegionalColor?: string;
 }
 
 interface FingerprintDb {
@@ -69,6 +83,15 @@ export interface CardFingerprint {
   classicColor:    ColourSignature | null;
   fullArtColor:    ColourSignature | null;
   borderlessColor: ColourSignature | null;
+  /**
+   * Regional colour signatures — null until fingerprints are rebuilt with
+   * v4 support. When present, each field is a 3×3 grid of ColourSignatures
+   * (row-major, 9 cells) enabling spatially-aware colour matching.
+   * CardMatcher can optionally incorporate these when non-null.
+   */
+  classicRegionalColor:    RegionalColourSignature | null;
+  fullArtRegionalColor:    RegionalColourSignature | null;
+  borderlessRegionalColor: RegionalColourSignature | null;
 }
 
 // ── Normalisation ──────────────────────────────────────────────────────────
@@ -90,6 +113,11 @@ function normalise(raw: RawEntry): CardFingerprint {
     classicColor:    deserializeColour(raw.classicColor),
     fullArtColor:    deserializeColour(raw.fullArtColor),
     borderlessColor: deserializeColour(raw.borderlessColor),
+    // Regional colour: deserialise 270-char hex → RegionalColourSignature;
+    // null for all pre-v4 entries (requires fingerprint rebuild to populate).
+    classicRegionalColor:    deserializeRegionalColour(raw.classicRegionalColor),
+    fullArtRegionalColor:    deserializeRegionalColour(raw.fullArtRegionalColor),
+    borderlessRegionalColor: deserializeRegionalColour(raw.borderlessRegionalColor),
   };
 }
 
