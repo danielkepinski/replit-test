@@ -63,6 +63,14 @@ export function MatchResults({ result, onScanAgain }: Props) {
                   {(colourScore * 100).toFixed(1)}%
                 </span>
               </div>
+              {bestMatch.regionalColourScore !== null && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Regional colour</span>
+                  <span className={scoreColor(bestMatch.regionalColourScore)}>
+                    {(bestMatch.regionalColourScore * 100).toFixed(1)}%
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Final score</span>
                 <span className={scoreColor(combinedScore)}>

@@ -9,7 +9,12 @@ import { imageToGrayscale32x32 } from '../utils/canvasUtils';
 import { extractAllCrops, CropMode } from '../vision/ArtworkExtractor';
 import { DetectDebugStats } from '../vision/CardDetector';
 import { validateCardStructure, CardStructureResult } from '../vision/CardStructureValidator';
-import { extractColourSignature, ColourSignature } from '../utils/colourSignature';
+import {
+  extractColourSignature,
+  ColourSignature,
+  extractRegionalColourSignature,
+  RegionalColourSignature,
+} from '../utils/colourSignature';
 import { createCenteredFallbackCrop } from '../vision/FallbackCropper';
 
 export type ScanState = 'idle' | 'detecting' | 'processing' | 'matched' | 'error';
@@ -81,8 +86,13 @@ function runMatchPipeline(cardCanvas: HTMLCanvasElement): {
     fullArt:    extractColourSignature(crops.fullArt),
     borderless: extractColourSignature(crops.borderless),
   };
+  const queryRegionals: Record<CropMode, RegionalColourSignature> = {
+    classic:    extractRegionalColourSignature(crops.classic),
+    fullArt:    extractRegionalColourSignature(crops.fullArt),
+    borderless: extractRegionalColourSignature(crops.borderless),
+  };
   const index  = getFingerprintIndex();
-  const matchOutput = matchCard(queryHashes, queryColours, index);
+  const matchOutput = matchCard(queryHashes, queryColours, index, 6, queryRegionals);
   return { structResult, matchOutput };
 }
 

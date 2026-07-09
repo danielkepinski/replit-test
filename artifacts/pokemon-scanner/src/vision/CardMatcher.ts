@@ -1,9 +1,30 @@
 import { CardFingerprint } from '../data/fingerprintDb';
 import { hammingDistance } from '../utils/phash';
-import { ColourSignature, colourDistance } from '../utils/colourSignature';
+import {
+  ColourSignature,
+  colourDistance,
+  RegionalColourSignature,
+  compareRegionalColourSignature,
+} from '../utils/colourSignature';
 import { CropMode, CROP_MODES } from './ArtworkExtractor';
 
 export type { CropMode };
+
+/**
+ * When both global and regional colour signatures are available, the colour
+ * term in the combined score is a weighted blend of the two:
+ *
+ *   colourScore = globalColourSim × GLOBAL_COLOUR_BLEND
+ *               + regionalColourSim × REGIONAL_COLOUR_BLEND
+ *
+ * Regional colour divides the crop into a 3×3 grid and compares cell-by-cell,
+ * catching cases where the global palette matches (e.g. Vulpix and Ho-Oh V
+ * are both orange/red) but the spatial layout of that colour differs.
+ * When regional data is absent (pre-v4 fingerprints), colourScore is the
+ * global similarity alone — existing behaviour is unchanged.
+ */
+const GLOBAL_COLOUR_BLEND   = 0.55;
+const REGIONAL_COLOUR_BLEND = 0.45;
 
 /**
  * Per-mode scoring weights.
@@ -81,9 +102,17 @@ export interface MatchEntry {
   confidence:    number;
   /** Hash similarity of the winning mode, 0–1. */
   hashScore:     number;
-  /** Colour similarity of the winning mode, 0–1.
-   *  Equals hashScore when colour data is unavailable (graceful fallback). */
+  /** Effective colour similarity used in scoring, 0–1.
+   *  When regional colour data is available (v4 fingerprints):
+   *    globalColourSim × GLOBAL_COLOUR_BLEND + regionalColourSim × REGIONAL_COLOUR_BLEND
+   *  When regional unavailable: global colour similarity only.
+   *  When all colour data unavailable: equals hashScore (graceful fallback). */
   colourScore:   number;
+  /** Regional colour similarity for the winning mode, 0–1.
+   *  null when regional colour data is unavailable on either the query or
+   *  the stored fingerprint (pre-v4 fingerprints). Used for debug display;
+   *  the scoring impact is already folded into colourScore. */
+  regionalColourScore: number | null;
   /** Weighted combined score, 0–1, with the low-hash penalty (if any)
    *  already applied.
    *  hashScore × w.hash + colourScore × w.colour  when colour available (per MODE_WEIGHTS);
@@ -121,6 +150,10 @@ function colourKey(mode: CropMode): 'classicColor' | 'fullArtColor' | 'borderles
   return `${mode}Color` as 'classicColor' | 'fullArtColor' | 'borderlessColor';
 }
 
+function regionalColourKey(mode: CropMode): 'classicRegionalColor' | 'fullArtRegionalColor' | 'borderlessRegionalColor' {
+  return `${mode}RegionalColor` as 'classicRegionalColor' | 'fullArtRegionalColor' | 'borderlessRegionalColor';
+}
+
 // ── Main matcher ───────────────────────────────────────────────────────────
 
 /**
@@ -129,8 +162,13 @@ function colourKey(mode: CropMode): 'classicColor' | 'fullArtColor' | 'borderles
  *
  * For each card, each crop mode is scored independently:
  *
- *   hashSim   = max(0, (32 − hammingDist) / 32)                      → [0, 1]
- *   colourSim = 1 − colourDistance(query, stored)                     → [0, 1]
+ *   hashSim         = max(0, (32 − hammingDist) / 32)                    → [0,1]
+ *   globalColourSim = 1 − colourDistance(query, stored)                   → [0,1]
+ *   regionalSim     = compareRegionalColourSignature(query, stored)       → [0,1]
+ *
+ *   colourSim = globalColourSim × 0.55 + regionalSim × 0.45  (both available)
+ *             = globalColourSim                                (regional unavailable)
+ *             = hashSim                                        (all colour unavailable)
  *
  *   w         = MODE_WEIGHTS[mode]
  *   modeScore = hashSim × w.hash + colourSim × w.colour  (colour available)
@@ -139,28 +177,32 @@ function colourKey(mode: CropMode): 'classicColor' | 'fullArtColor' | 'borderles
  * The mode with the highest modeScore wins for that card.
  * Cards are ranked by their winning modeScore (descending).
  *
- * Performance:  3 × N BigInt XOR + N × 3 × ~20 float ops.
+ * Performance:  3 × N BigInt XOR + N × 3 × ~30 float ops.
  * At N = 20 000: well under 10 ms in modern browsers.
  *
- * Backwards compatibility: cards whose stored colour fields are null
- * (pre-v3 fingerprints) fall back to hash-only scoring automatically.
+ * Backwards compatibility:
+ *   - pre-v3 fingerprints (no colour fields) → hash-only scoring
+ *   - pre-v4 fingerprints (no regional fields) → global colour only (no blend)
+ *   - v4 fingerprints → full hash + blended colour scoring
  */
 export function matchCard(
-  queryHashes:  Record<CropMode, bigint>,
-  queryColours: Record<CropMode, ColourSignature | null> | null,
-  index:        CardFingerprint[],
+  queryHashes:    Record<CropMode, bigint>,
+  queryColours:   Record<CropMode, ColourSignature | null> | null,
+  index:          CardFingerprint[],
   topN = 6,
+  queryRegionals: Record<CropMode, RegionalColourSignature | null> | null = null,
 ): MatchOutput {
   const t0 = performance.now();
 
   type Scored = MatchEntry & { _mode: CropMode };
 
   const results: Scored[] = index.map(card => {
-    let bestBiased    = -1; // includes MODE_TIEBREAK_BONUS — selection only
-    let bestScore     = -1; // penalized combined score — used for reporting/ranking
+    let bestBiased    = -1;          // includes MODE_TIEBREAK_BONUS — selection only
+    let bestScore     = -1;          // penalized combined score — used for reporting/ranking
     let bestMode:     CropMode = 'classic';
     let bestHash      = 0;
-    let bestColour    = 0;
+    let bestColour    = 0;           // effective (blended) colour score for winning mode
+    let bestRegional: number | null = null; // raw regional score for winning mode (debug only)
     let bestDist      = 63;
     let bestPenalized = false;
 
@@ -173,11 +215,27 @@ export function matchCard(
       const queryColour  = queryColours?.[mode] ?? null;
       const hasColour    = storedColour !== null && queryColour !== null;
 
-      const colourSim = hasColour
+      // Global colour similarity (or hashSim proxy when colour unavailable)
+      const globalColourSim = hasColour
         ? 1 - colourDistance(queryColour!, storedColour!)
         : hashSim; // neutral proxy — keeps scale consistent
 
-      const w        = MODE_WEIGHTS[mode];
+      // Regional colour similarity — only available when both the query and
+      // stored fingerprint carry regional data (v4+).
+      const storedRegional = card[regionalColourKey(mode)];
+      const queryRegional  = queryRegionals?.[mode] ?? null;
+      const hasRegional    = storedRegional !== null && queryRegional !== null;
+      const regionalSim    = hasRegional
+        ? compareRegionalColourSignature(queryRegional!, storedRegional!)
+        : null;
+
+      // Blend: when regional data is present, weight global 55 % + regional 45 %.
+      // When absent, use global colour alone — pre-v4 behaviour is unchanged.
+      const colourSim = (hasRegional && regionalSim !== null)
+        ? globalColourSim * GLOBAL_COLOUR_BLEND + regionalSim * REGIONAL_COLOUR_BLEND
+        : globalColourSim;
+
+      const w           = MODE_WEIGHTS[mode];
       const rawCombined = hasColour
         ? hashSim * w.hash + colourSim * w.colour
         : hashSim;
@@ -195,7 +253,8 @@ export function matchCard(
         bestScore     = combined;
         bestMode      = mode;
         bestHash      = hashSim;
-        bestColour    = colourSim;
+        bestColour    = colourSim;   // blended when regional available
+        bestRegional  = regionalSim; // null when regional unavailable
         bestDist      = dist;
         bestPenalized = penalized;
       }
@@ -207,6 +266,7 @@ export function matchCard(
       confidence:            bestScore * 100,
       hashScore:             bestHash,
       colourScore:           bestColour,
+      regionalColourScore:   bestRegional,
       combinedScore:         bestScore,
       lowHashPenaltyApplied: bestPenalized,
       _mode:                 bestMode,

@@ -99,6 +99,18 @@ export function DebugPanel({
           <span className="text-muted-foreground">
             COLOUR WEIGHT: <span className="text-primary/80">{(matchResult.colourWeight * 100).toFixed(0)}%</span>
           </span>
+          {matchResult.bestMatch.regionalColourScore !== null && (
+            <span className="text-muted-foreground">
+              REGIONAL COLOUR:{' '}
+              <span className={
+                matchResult.bestMatch.regionalColourScore >= 0.7 ? 'text-primary'
+                : matchResult.bestMatch.regionalColourScore >= 0.5 ? 'text-amber-400'
+                : 'text-destructive'
+              }>
+                {pct(matchResult.bestMatch.regionalColourScore)}
+              </span>
+            </span>
+          )}
         </div>
       )}
 
