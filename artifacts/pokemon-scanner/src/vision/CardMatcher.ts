@@ -8,20 +8,54 @@ export type { CropMode };
 /**
  * Per-mode scoring weights.
  *
- * Classic cards have sharper, more distinctive illustration-box structure,
- * so colour gets a larger role (0.45) to separate palette-similar cards.
+ * Colour-only false positives (high colour similarity, weak structural/hash
+ * similarity — e.g. Mega Greninja ex scans matching Kabutops on palette
+ * alone) showed colour was overweighted relative to hash across all modes.
+ * Hash weight was raised and colour weight lowered accordingly; see also
+ * the low-hash penalty below, which further suppresses matches with weak
+ * hash similarity regardless of how strong the colour similarity is.
  *
  * Full-art cards bleed colour across nearly the full frame; similar colour
- * palettes appear across many cards, so the hash gets more trust (0.70).
+ * palettes appear across many cards, so the hash gets the most trust (0.80).
  *
  * Borderless cards are similar to full-art in structure, so the hash weight
- * is slightly higher still (0.75) to resist false colour matches.
+ * is slightly lower still (0.75) but remains hash-dominant.
+ *
+ * Classic cards have sharper, more distinctive illustration-box structure,
+ * so colour retains a modest role (0.30) to help separate hash-similar cards.
  */
 export const MODE_WEIGHTS: Record<CropMode, { hash: number; colour: number }> = {
-  classic:    { hash: 0.55, colour: 0.45 },
-  fullArt:    { hash: 0.70, colour: 0.30 },
+  classic:    { hash: 0.70, colour: 0.30 },
+  fullArt:    { hash: 0.80, colour: 0.20 },
   borderless: { hash: 0.75, colour: 0.25 },
 };
+
+/**
+ * Low-hash penalty thresholds.
+ *
+ * A high colour score cannot rescue a card whose hash similarity is weak —
+ * this is what produces colour-only false positives (matching a visually
+ * different card that happens to share a dominant palette). Penalties are
+ * applied to the mode's combined score (before the tie-break bonus, so the
+ * tie-break bonus can never rescue a penalized low-hash score) and roll
+ * straight through into the reported/displayed final score.
+ *
+ * No penalty applies once hashSimilarity >= LOW_HASH_THRESHOLD.
+ */
+const LOW_HASH_THRESHOLD        = 0.45; // below this: moderate penalty
+const STRONG_LOW_HASH_THRESHOLD = 0.40; // below this: strong penalty
+const LOW_HASH_PENALTY_FACTOR        = 0.75; // combined score ×= this
+const STRONG_LOW_HASH_PENALTY_FACTOR = 0.60; // combined score ×= this
+
+function applyLowHashPenalty(combined: number, hashSim: number): { combined: number; penalized: boolean } {
+  if (hashSim < STRONG_LOW_HASH_THRESHOLD) {
+    return { combined: combined * STRONG_LOW_HASH_PENALTY_FACTOR, penalized: true };
+  }
+  if (hashSim < LOW_HASH_THRESHOLD) {
+    return { combined: combined * LOW_HASH_PENALTY_FACTOR, penalized: true };
+  }
+  return { combined, penalized: false };
+}
 
 /**
  * Small mode-selection tie-break bonus, added only when choosing which
@@ -50,10 +84,16 @@ export interface MatchEntry {
   /** Colour similarity of the winning mode, 0–1.
    *  Equals hashScore when colour data is unavailable (graceful fallback). */
   colourScore:   number;
-  /** Weighted combined score, 0–1.
-   *  hashScore × 0.65 + colourScore × 0.35  when colour available;
-   *  hashScore                               when colour unavailable. */
+  /** Weighted combined score, 0–1, with the low-hash penalty (if any)
+   *  already applied.
+   *  hashScore × w.hash + colourScore × w.colour  when colour available (per MODE_WEIGHTS);
+   *  hashScore                                     when colour unavailable;
+   *  then ×= penalty factor when hashScore < LOW_HASH_THRESHOLD. */
   combinedScore: number;
+  /** True when the low-hash penalty (moderate or strong) was applied to
+   *  this entry's winning mode — i.e. hashScore was below the low-hash
+   *  threshold and the combined score was reduced accordingly. */
+  lowHashPenaltyApplied: boolean;
 }
 
 export interface MatchOutput {
@@ -116,12 +156,13 @@ export function matchCard(
   type Scored = MatchEntry & { _mode: CropMode };
 
   const results: Scored[] = index.map(card => {
-    let bestBiased   = -1; // includes MODE_TIEBREAK_BONUS — selection only
-    let bestScore    = -1; // raw combined score — used for reporting/ranking
-    let bestMode:    CropMode = 'classic';
-    let bestHash     = 0;
-    let bestColour   = 0;
-    let bestDist     = 63;
+    let bestBiased    = -1; // includes MODE_TIEBREAK_BONUS — selection only
+    let bestScore     = -1; // penalized combined score — used for reporting/ranking
+    let bestMode:     CropMode = 'classic';
+    let bestHash      = 0;
+    let bestColour    = 0;
+    let bestDist      = 63;
+    let bestPenalized = false;
 
     for (const mode of CROP_MODES) {
       const storedHash = BigInt('0x' + card[hashKey(mode)]);
@@ -137,32 +178,38 @@ export function matchCard(
         : hashSim; // neutral proxy — keeps scale consistent
 
       const w        = MODE_WEIGHTS[mode];
-      const combined = hasColour
+      const rawCombined = hasColour
         ? hashSim * w.hash + colourSim * w.colour
         : hashSim;
 
+      // Low-hash penalty is applied BEFORE the tie-break bonus, so the
+      // tie-break bonus can never rescue a penalized low-hash false positive.
+      const { combined, penalized } = applyLowHashPenalty(rawCombined, hashSim);
+
       // Tie-break bonus only affects which mode wins for this card — the
-      // reported score (bestScore) stays the true, unbiased combined score.
+      // reported score (bestScore) stays the true, penalized combined score.
       const biased = combined + MODE_TIEBREAK_BONUS[mode];
 
       if (biased > bestBiased) {
-        bestBiased = biased;
-        bestScore  = combined;
-        bestMode   = mode;
-        bestHash   = hashSim;
-        bestColour = colourSim;
-        bestDist   = dist;
+        bestBiased    = biased;
+        bestScore     = combined;
+        bestMode      = mode;
+        bestHash      = hashSim;
+        bestColour    = colourSim;
+        bestDist      = dist;
+        bestPenalized = penalized;
       }
     }
 
     return {
       card,
-      distance:      bestDist,
-      confidence:    bestScore * 100,
-      hashScore:     bestHash,
-      colourScore:   bestColour,
-      combinedScore: bestScore,
-      _mode:         bestMode,
+      distance:              bestDist,
+      confidence:            bestScore * 100,
+      hashScore:             bestHash,
+      colourScore:           bestColour,
+      combinedScore:         bestScore,
+      lowHashPenaltyApplied: bestPenalized,
+      _mode:                 bestMode,
     };
   });
 
