@@ -83,6 +83,8 @@ const CROPS = {
 // Accepts a flat byte array (channels=3 for RGB, channels=4 for RGBA),
 // pixelCount = width × height of the buffer.
 // Returns a 30-char lowercase hex string: RRGGBB + 12 hue-histogram bytes.
+//
+// Also see computeRegionalColourSig below, which calls this per 10×10 cell.
 function computeColourSig(data, pixelCount, channels) {
   let sumR = 0, sumG = 0, sumB = 0;
   const hist = new Float64Array(12);
@@ -136,6 +138,62 @@ function colourSigFromCrop(rgbaData, srcW, srcH, cropX, cropY, cropW, cropH) {
     }
   }
   return computeColourSig(buf, N * N, 4);
+}
+
+// ── Regional colour signature (mirrors src/utils/colourSignature.ts) ──────────
+// Splits a 30×30 pixel buffer into a 3×3 grid of 10×10-pixel cells and
+// computes a ColourSignature for each cell using computeColourSig.
+// Returns a 270-char lowercase hex string (9 × 30-char blocks, row-major).
+//
+// The 30×30 buffer must already be downsampled from the crop window:
+//   - sharp path: .resize(30, 30, { kernel: 'nearest' }).raw()
+//   - fallback path: use regionalColourSigFromCrop() which samples first.
+//
+// GRID_ROWS=3, GRID_COLS=3, REGION_PX=10 must stay in sync with
+// colourSignature.ts (REGIONAL_COLOUR_HEX_LENGTH = 270).
+function computeRegionalColourSig(data, channels) {
+  const GRID     = 3;
+  const REGION   = 10; // pixels per region edge (30 / 3)
+  const W        = 30; // full sample width
+  const blocks   = [];
+
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      // Copy this 10×10 cell into a contiguous buffer for computeColourSig.
+      const regionBuf = new Uint8Array(REGION * REGION * channels);
+      let dst = 0;
+      for (let py = row * REGION; py < (row + 1) * REGION; py++) {
+        for (let px = col * REGION; px < (col + 1) * REGION; px++) {
+          const src = (py * W + px) * channels;
+          for (let c = 0; c < channels; c++) {
+            regionBuf[dst++] = data[src + c];
+          }
+        }
+      }
+      blocks.push(computeColourSig(regionBuf, REGION * REGION, channels));
+    }
+  }
+  return blocks.join(''); // 9 × 30 = 270 chars
+}
+
+// Nearest-neighbour downsample of a crop window to 30×30 RGBA, then compute
+// regional colour signature.  Used by the pure-JS fallback path.
+function regionalColourSigFromCrop(rgbaData, srcW, srcH, cropX, cropY, cropW, cropH) {
+  const N = 30;
+  const buf = new Uint8Array(N * N * 4);
+  for (let dy = 0; dy < N; dy++) {
+    for (let dx = 0; dx < N; dx++) {
+      const sx = Math.min(srcW - 1, Math.round(cropX + (dx + 0.5) * cropW / N));
+      const sy = Math.min(srcH - 1, Math.round(cropY + (dy + 0.5) * cropH / N));
+      const srcI = (sy * srcW + sx) * 4;
+      const dstI = (dy * N + dx) * 4;
+      buf[dstI]     = rgbaData[srcI];
+      buf[dstI + 1] = rgbaData[srcI + 1];
+      buf[dstI + 2] = rgbaData[srcI + 2];
+      buf[dstI + 3] = rgbaData[srcI + 3];
+    }
+  }
+  return computeRegionalColourSig(buf, 4);
 }
 
 // ── Bilinear resize to 32×32 grayscale with optional crop window ─────────────
@@ -212,15 +270,17 @@ function computePHash(pixels /* Float64Array 1024 */) {
 
 // ── Image URL → multi-crop pHashes + colour signatures ───────────────────────
 // Returns { classicHash, fullArtHash, borderlessHash,
-//           classicColor, fullArtColor, borderlessColor }.
+//           classicColor, fullArtColor, borderlessColor,
+//           classicRegionalColor, fullArtRegionalColor, borderlessRegionalColor }.
 // The image buffer is decoded once; all three crops share the same raw pixels.
 async function processImageUrl(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  const hashes  = {};
-  const colours = {};
+  const hashes    = {};
+  const colours   = {};
+  const regionals = {};
 
   if (sharpFn) {
     const meta = await sharpFn(buf).metadata();
@@ -231,7 +291,7 @@ async function processImageUrl(url) {
       const cropW = Math.round((crop.xMax - crop.xMin) * width);
       const cropH = Math.round((crop.yMax - crop.yMin) * height);
 
-      // Get raw RGB at 32×32 — one operation per crop, no separate grayscale call.
+      // 32×32 pipeline — pHash + global colour signature (unchanged).
       // Using nearest-neighbour matches the fallback path; the colour signature
       // is a coarse 12-bin histogram so minor differences in resize kernels
       // (Lanczos / bilinear / nearest) have negligible effect on matching.
@@ -243,7 +303,7 @@ async function processImageUrl(url) {
 
       const ch = info.channels; // 3 (JPEG/RGB) or 4 (PNG/RGBA)
 
-      // Colour signature from raw RGB channels
+      // Global colour signature from 32×32 raw pixels
       colours[`${mode}Color`] = computeColourSig(data, 32 * 32, ch);
 
       // pHash — convert to BT.601 luminance manually (same as .grayscale())
@@ -252,6 +312,17 @@ async function processImageUrl(url) {
         pixels[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
       }
       hashes[`${mode}Hash`] = computePHash(pixels);
+
+      // 30×30 pipeline — regional colour signature (3×3 grid, 10×10 px per cell).
+      // Separate resize to 30 (divisible by 3) so each of the 9 cells gets
+      // exactly 10×10 pixels without fractional boundaries.
+      const { data: data30, info: info30 } = await sharpFn(buf)
+        .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
+        .resize(30, 30, { kernel: 'nearest' })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      regionals[`${mode}RegionalColor`] = computeRegionalColourSig(data30, info30.channels);
     }
   } else {
     const { width, height, data } = await decodeImageFallback(buf);
@@ -260,12 +331,13 @@ async function processImageUrl(url) {
       const cropY = Math.round(crop.yMin * height);
       const cropW = Math.round((crop.xMax - crop.xMin) * width);
       const cropH = Math.round((crop.yMax - crop.yMin) * height);
-      hashes[`${mode}Hash`]  = computePHash(bilinearResize32(data, width, height, cropX, cropY, cropW, cropH));
-      colours[`${mode}Color`] = colourSigFromCrop(data, width, height, cropX, cropY, cropW, cropH);
+      hashes[`${mode}Hash`]           = computePHash(bilinearResize32(data, width, height, cropX, cropY, cropW, cropH));
+      colours[`${mode}Color`]          = colourSigFromCrop(data, width, height, cropX, cropY, cropW, cropH);
+      regionals[`${mode}RegionalColor`] = regionalColourSigFromCrop(data, width, height, cropX, cropY, cropW, cropH);
     }
   }
 
-  return { ...hashes, ...colours };
+  return { ...hashes, ...colours, ...regionals };
 }
 
 // ── pokemontcg.io API ────────────────────────────────────────────────────────
@@ -446,7 +518,8 @@ async function loadExisting() {
   const allMeta  = await fetchAllCardMeta();
 
   // Filter to only cards that still need processing.
-  // Re-process entries missing multi-crop hashes OR colour signatures (v3).
+  // Re-process entries missing multi-crop hashes, colour signatures (v3),
+  // or regional colour signatures (v4).
   const ZERO = '0'.repeat(16);
   const todo = allMeta.filter(c => {
     const e = existing.get(c.id);
@@ -454,7 +527,8 @@ async function loadExisting() {
       || !e.classicHash    || e.classicHash    === ZERO
       || !e.fullArtHash    || e.fullArtHash    === ZERO
       || !e.borderlessHash || e.borderlessHash === ZERO
-      || !e.classicColor   || !e.fullArtColor  || !e.borderlessColor;
+      || !e.classicColor         || !e.fullArtColor         || !e.borderlessColor
+      || !e.classicRegionalColor || !e.fullArtRegionalColor || !e.borderlessRegionalColor;
   });
 
   console.log(`Cards to process: ${todo.length} (${existing.size} cached)`);
